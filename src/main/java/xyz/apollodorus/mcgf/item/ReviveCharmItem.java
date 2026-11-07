@@ -40,7 +40,10 @@ public class ReviveCharmItem extends Item {
         // 1) A live companion of mine is loaded → tuck her into the charm.
         GirlfriendEntity live = findOwned(sp);
         if (live != null) {
-            ReviveService.capture(sp, live);
+            if (!ReviveService.capture(sp, live)) {
+                sp.sendMessage(Text.literal("这次没能保存行囊，达妮娅还在你身边。"), true);
+                return ActionResult.FAIL;
+            }
             sp.sendMessage(Text.literal("把达妮娅收进符里了，路上当心~"), true);
             return ActionResult.SUCCESS;
         }

@@ -16,10 +16,8 @@ import net.minecraft.client.render.entity.model.PlayerEntityModel;
  * so her configured skin actually binds.
  *
  * <p>We still want Alex-style 3px ("thin") arms, so we reuse only the slim PLAYER model
- * <i>geometry</i> ({@code thinArms = true}); rendering goes through the biped path. A plain
- * biped renders head + headwear (hat) layer, body, the slim arms and legs — the body/arm/leg
- * second overlay layers (jacket/sleeves/pants) aren't drawn, which is the accepted trade-off
- * for a texture that doesn't get hijacked.
+ * <i>geometry</i> ({@code thinArms = true}), including the attached jacket, sleeves and
+ * trousers; rendering goes through the biped path.
  */
 public class GirlfriendEntityModel extends BipedEntityModel<GirlfriendRenderState> {
     public GirlfriendEntityModel(ModelPart root) {

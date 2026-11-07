@@ -11,7 +11,7 @@ import javax.sound.sampled.FloatControl;
 import java.io.ByteArrayInputStream;
 
 /**
- * Shared WAV playback through Java Sound, used by the GPT-SoVITS {@link TtsClient}, the bundled
+ * Shared WAV playback through Java Sound, used by the {@link TtsClient}, the bundled
  * {@link VoiceClips}, and the positional combat {@link ClipSounds}. Blocks until the clip finishes
  * (run it on a worker thread). Any failure degrades silently so the game never stalls.
  *
@@ -34,22 +34,26 @@ public final class AudioPlayback {
      * plays at full volume rather than failing.
      */
     public static void play(byte[] wav, float gain, float pan) {
-        if (wav == null || wav.length == 0) return;
-        AudioInputStream in = null;
-        try {
-            in = toPcm16(AudioSystem.getAudioInputStream(new ByteArrayInputStream(wav)));
-            Clip clip = AudioSystem.getClip();
+        playWav(wav, gain, pan);
+    }
+
+    static boolean playWav(byte[] wav, float gain, float pan) {
+        if (wav == null || wav.length == 0) return false;
+        try (AudioInputStream in = toPcm16(AudioSystem.getAudioInputStream(new ByteArrayInputStream(wav)));
+             Clip clip = AudioSystem.getClip()) {
             clip.open(in);
             applyGain(clip, gain);
             applyPan(clip, pan);
             clip.start();
             long ms = clip.getMicrosecondLength() / 1000L;
             Thread.sleep(ms + 200L);
-            clip.close();
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
         } catch (Exception e) {
             LOGGER.warn("[mcgf] audio playback failed: {}", e.toString());
-        } finally {
-            if (in != null) try { in.close(); } catch (Exception ignored) {}
+            return false;
         }
     }
 

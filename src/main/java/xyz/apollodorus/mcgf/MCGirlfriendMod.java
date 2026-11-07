@@ -24,6 +24,7 @@ import net.minecraft.util.math.Direction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import xyz.apollodorus.mcgf.ai.ChatBrain;
+import xyz.apollodorus.mcgf.ai.JourneyMemories;
 import xyz.apollodorus.mcgf.ai.MoodManager;
 import xyz.apollodorus.mcgf.combat.AbilityManager;
 import xyz.apollodorus.mcgf.command.GfCommands;
@@ -50,11 +51,11 @@ public class MCGirlfriendMod implements ModInitializer {
         xyz.apollodorus.mcgf.block.ModBlocks.register();
         xyz.apollodorus.mcgf.item.ModItems.register();
         xyz.apollodorus.mcgf.screen.ModScreens.register();
-        xyz.apollodorus.mcgf.entity.DownedManager.load();
+        ServerLifecycleEvents.SERVER_STARTING.register(xyz.apollodorus.mcgf.entity.DownedManager::load);
         ModNetworking.registerCommon();
-        BRAIN = new ChatBrain();
 
         GfCommands.register();
+        JourneyMemories.register();
 
         // In-game config panel (C2S): apply the LLM/TTS connection settings the owner edited in her
         // panel, then persist them — so players never have to hand-edit config/mcgf.json. The handler
@@ -95,7 +96,10 @@ public class MCGirlfriendMod implements ModInitializer {
         });
 
         // 绑定持久化记忆到当前存档目录（重启不忘）。
-        ServerLifecycleEvents.SERVER_STARTED.register(xyz.apollodorus.mcgf.ai.MemoryStore::init);
+        ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+            xyz.apollodorus.mcgf.ai.MemoryStore.init(server);
+            BRAIN = new ChatBrain(server);
+        });
 
         // 情景记忆埋点：玩家死亡 / 维度切换——记下「你们一起经历过的事」，只入记忆、绝不主动念出来。
         ServerLivingEntityEvents.AFTER_DEATH.register((entity, source) -> {
@@ -182,6 +186,8 @@ public class MCGirlfriendMod implements ModInitializer {
 
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
             if (BRAIN != null) BRAIN.shutdown();
+            BRAIN = null;
+            MoodManager.reset();
             AbilityManager.flushAll();
             xyz.apollodorus.mcgf.ai.MemoryStore.flush();   // 落盘全部长期记忆/情景事件
             xyz.apollodorus.mcgf.entity.GirlfriendEntity.ACTIVE.clear();

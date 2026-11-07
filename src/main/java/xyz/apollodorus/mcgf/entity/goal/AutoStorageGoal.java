@@ -40,7 +40,7 @@ public class AutoStorageGoal extends Goal {
     @Override
     public boolean canStart() {
         if (!(gf.getEntityWorld() instanceof ServerWorld)) return false;
-        if (gf.getTarget() != null || gf.getTask() != null) return false;
+        if (gf.getTarget() != null || !gf.getTasks().isEmpty()) return false;
         if (!ConfigManager.get().behavior.autoStorage) return false;
         if (gf.getHomePos() == null) return false;
 

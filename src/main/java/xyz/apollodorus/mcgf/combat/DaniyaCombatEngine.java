@@ -4,6 +4,7 @@ import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.attribute.EntityAttributes;
 import net.minecraft.entity.effect.StatusEffectInstance;
 import net.minecraft.entity.effect.StatusEffects;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.particle.DustParticleEffect;
 import net.minecraft.particle.ParticleTypes;
 import net.minecraft.server.world.ServerWorld;
@@ -212,7 +213,8 @@ public class DaniyaCombatEngine {
                 List<LivingEntity> enemies = sw.getEntitiesByClass(LivingEntity.class,
                         new Box(ringPos.x - 2.5, ringPos.y - 1.5, ringPos.z - 2.5,
                                 ringPos.x + 2.5, ringPos.y + 2.0, ringPos.z + 2.5),
-                        e -> e != gf && e.isAlive() && !e.isTeammate(gf));
+                        e -> e != gf && e.isAlive() && !e.isTeammate(gf)
+                                && !(e instanceof PlayerEntity player && gf.isOwner(player)));
 
                 for (LivingEntity e : enemies) {
                     e.damage(sw, gf.getDamageSources().magic(), (float) (ConfigManager.get().behavior.rangedDamage * 1.5));

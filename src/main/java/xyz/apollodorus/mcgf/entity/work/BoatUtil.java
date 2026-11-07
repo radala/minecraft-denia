@@ -4,27 +4,26 @@ import net.minecraft.entity.vehicle.AbstractBoatEntity;
 import net.minecraft.util.math.Box;
 import xyz.apollodorus.mcgf.entity.GirlfriendEntity;
 
+import java.util.Comparator;
 import java.util.List;
 
 /** Boarding / leaving boats — shared by the command and the LLM tool. */
 public final class BoatUtil {
     private BoatUtil() {}
 
-    /** Board the nearest boat within {@code radius} blocks. Returns true if she's now riding one. */
+    /** Board the nearest boat in the search area that will accept her. */
     public static boolean boardNearest(GirlfriendEntity gf, double radius) {
         if (gf.hasVehicle()) return true; // already aboard something
         Box box = gf.getBoundingBox().expand(radius);
         List<AbstractBoatEntity> boats = gf.getEntityWorld()
             .getEntitiesByClass(AbstractBoatEntity.class, box, b -> b.isAlive());
-        AbstractBoatEntity best = null;
-        double bestSq = Double.MAX_VALUE;
-        for (AbstractBoatEntity b : boats) {
-            double d = b.squaredDistanceTo(gf);
-            if (d < bestSq) { bestSq = d; best = b; }
-        }
-        if (best == null) return false;
+        if (boats.isEmpty()) return false;
+        boats.sort(Comparator.comparingDouble(gf::squaredDistanceTo));
         gf.getNavigation().stop();
-        return gf.startRiding(best);
+        for (AbstractBoatEntity boat : boats) {
+            if (gf.startRiding(boat)) return true;
+        }
+        return false;
     }
 
     /** Get off whatever she's riding. Returns true if she actually was riding something. */

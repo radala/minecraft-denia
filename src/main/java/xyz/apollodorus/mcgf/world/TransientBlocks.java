@@ -40,6 +40,22 @@ public final class TransientBlocks {
         entries.add(new Entry(world, p, original, expiryTick, owner));
     }
 
+    /** The terrain a permanent structure can rely on after a temporary void block disappears. */
+    public BlockState stateAfterExpiry(ServerWorld world, BlockPos pos) {
+        BlockState current = world.getBlockState(pos);
+        if (current.isOf(ModBlocks.VOID_BLOCK)) {
+            for (Entry e : entries) {
+                if (e.world == world && e.pos.equals(pos)) return e.original;
+            }
+        }
+        return current; // An untracked void block can be a player's permanent building block.
+    }
+
+    /** Commit a permanent edit only once the entire camp was successfully placed. */
+    public void forgetReplaced(ServerWorld world, BlockPos pos) {
+        entries.removeIf(e -> e.world == world && e.pos.equals(pos));
+    }
+
     /** Restore every block whose time is up (server-tick driver). */
     public void tick() {
         Iterator<Entry> it = entries.iterator();

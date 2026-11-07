@@ -41,9 +41,10 @@ public final class LlmClient {
      * beats a dead conversation.
      */
     public JsonObject complete(JsonArray messages, JsonArray tools) {
+        if (Thread.currentThread().isInterrupted()) return null;
         GirlfriendConfig.Llm cfg = ConfigManager.get().llm;
         JsonObject result = sendOnce(cfg, messages, tools);
-        if (result == null && tools != null && !tools.isEmpty()) {
+        if (result == null && !Thread.currentThread().isInterrupted() && tools != null && !tools.isEmpty()) {
             LOGGER.warn("[mcgf] tools request failed; retrying once without tools");
             result = sendOnce(cfg, messages, null);
         }
@@ -84,6 +85,9 @@ public final class LlmClient {
                 return null;
             }
             return choices.get(0).getAsJsonObject().getAsJsonObject("message");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
         } catch (Exception e) {
             LOGGER.warn("[mcgf] LLM request failed (model={}, msgs={}): {}", cfg.model, messages.size(), e.toString());
             return null;

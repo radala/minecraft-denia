@@ -33,6 +33,12 @@ public final class MoodManager {
     /** Per-pool "shuffle bag" of not-yet-used indices, so proactive topics cycle the whole pool before repeating. */
     private static final Map<String, Deque<Integer>> BAGS = new HashMap<>();
 
+    public static void reset() {
+        STATES.clear();
+        BAGS.clear();
+        tick = 0;
+    }
+
     private static final class State {
         long lastSpoke = Long.MIN_VALUE / 2;
         long lastEventSpoke = Long.MIN_VALUE / 2;   // event-triggered lines have their own (longer) cooldown
@@ -63,6 +69,7 @@ public final class MoodManager {
     public static void onServerTick(MinecraftServer server) {
         tick++;
         if (tick % 20 != 0) return; // evaluate ~once per second
+        for (var player : server.getPlayerManager().getPlayerList()) JourneyMemories.observeTravel(player);
 
         GirlfriendConfig cfg = ConfigManager.get();
         if (!cfg.behavior.proactiveEnabled || MCGirlfriendMod.BRAIN == null) return;
@@ -96,6 +103,11 @@ public final class MoodManager {
             // Nothing notable → maybe a calm ambient remark, on its own (shorter) cadence.
             // 战斗/他快没血/二形态时不碎碎念——专心打或护人，别在打架时馋蛋糕。
             if (countHostiles(gf) > 0 || owner.getHealth() <= 6.0f || gf.isFormTwo()) continue;
+            if (tick - s.lastSpoke >= minGap && JourneyMemories.recallBirthday(gf, owner)) {
+                s.lastEventSpoke = tick;
+                s.lastSpoke = tick;
+                continue;
+            }
 
             // 沉默感知：玩家越久没跟她说话，她越安静——主动碎碎念的概率收紧、间隔拉长，最终基本闭嘴、安静做
             // 自己的事。事件（怪/夜/箱子/钓到鱼…）走的是上面的事件通道，不受此压制——「只有发生事情才打破沉默」。

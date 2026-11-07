@@ -52,39 +52,17 @@ public final class CraftUtil {
         int maxDepth;
     }
 
+    static List<Ingredient> ingredients(GirlfriendEntity gf, Item out) {
+        World world = gf.getEntityWorld();
+        ensureCache(world.getServer().getRecipeManager(), world);
+        CraftingRecipe recipe = byOutput.get(out);
+        return recipe == null ? List.of() : recipe.getIngredientPlacement().getIngredients();
+    }
+
     /**
      * 把 {@code out} 合成到她背包里，直到累计做出 {@code count} 个或做不下去为止。递归先补中间材料。
      * 全程用批快照做回滚：一个批次中途失败会撤销该批的消耗；整体一个都没做出来则完全还原背包。
      */
-    
-    /**
-     * 推导目标物品所需但背包尚缺的原料列表。
-     */
-    public static List<Item> getMissingRawMaterials(GirlfriendEntity gf, Item target) {
-        List<Item> missing = new ArrayList<>();
-        if (target == null || gf == null) return missing;
-        World world = gf.getEntityWorld();
-        MinecraftServer server = world.getServer();
-        if (server == null) return missing;
-        ensureCache(server.getRecipeManager(), world);
-
-        CraftingRecipe recipe = byOutput.get(target);
-        if (recipe != null) {
-            for (Ingredient ing : recipe.getIngredientPlacement().getIngredients()) {
-                if (ing == null || ing.isEmpty()) continue;
-                
-                if (ing.isEmpty()) continue;
-                List<RegistryEntry<Item>> items = ing.getMatchingItems().toList();
-                if (items.isEmpty()) continue;
-                Item first = items.get(0).value();
-                if (gf.countItem(first) <= 0) {
-                    missing.add(first);
-                }
-            }
-        }
-        return missing;
-    }
-
     public static Result craft(GirlfriendEntity gf, Item out, int count) {
         if (out == null) return new Result(false, 0, null);
         if (count <= 0) count = 1;
@@ -122,6 +100,7 @@ public final class CraftUtil {
 
         List<ItemStack> batchSnap = snapshot(inv);
         boolean added = ctx.inProgress.add(out);         // 环路防护：本产物入链
+        List<ItemStack> remainders = new ArrayList<>();
         try {
             for (Ingredient ing : ings) {
                 int slot = findMatch(inv, ing);
@@ -135,6 +114,8 @@ public final class CraftUtil {
                     if (slot < 0) { restore(inv, batchSnap); return false; }
                 }
                 ItemStack s = inv.getStack(slot);
+                ItemStack remainder = s.getItem().getRecipeRemainder();
+                if (!remainder.isEmpty()) remainders.add(remainder);
                 s.decrement(1);
                 if (s.isEmpty()) inv.setStack(slot, ItemStack.EMPTY);
             }
@@ -146,9 +127,14 @@ public final class CraftUtil {
         try { result = recipe.craft(CraftingRecipeInput.EMPTY, ctx.reg); }
         catch (Exception e) { restore(inv, batchSnap); return false; }
         if (result.isEmpty()) { restore(inv, batchSnap); return false; }
-        ItemStack overflow = inv.addStack(result.copy());
-        // 容不下的溢出丢在她脚边，别凭空蒸发。
-        if (!overflow.isEmpty()) dropAtFeet(inv, overflow);
+        remainders.add(result);
+        for (ItemStack stack : remainders) {
+            if (!inv.addStack(stack.copy()).isEmpty()) {
+                restore(inv, batchSnap);
+                ctx.missing = "背包空间";
+                return false;
+            }
+        }
         return true;
     }
 
@@ -170,17 +156,16 @@ public final class CraftUtil {
         if (byOutput != null && cachedManager == rm) return;
         Map<Item, CraftingRecipe> map = new HashMap<>();
         RegistryWrapper.WrapperLookup reg = world.getRegistryManager();
-        for (RecipeEntry<?> entry : rm.values()) {
+        for (RecipeEntry<?> entry : rm.values().stream()
+            .sorted(java.util.Comparator.comparing(e -> e.id().getValue().toString())).toList()) {
             Recipe<?> r = entry.value();
             if (!(r instanceof CraftingRecipe cr)) continue;
             if (!(cr instanceof ShapedRecipe) && !(cr instanceof ShapelessRecipe)) continue; // 跳过特殊动态配方
-            ItemStack res = ItemStack.EMPTY;
+            ItemStack res;
             try {
-                java.lang.reflect.Field f = cr.getClass().getDeclaredField("result");
-                f.setAccessible(true);
-                res = (ItemStack) f.get(cr);
-            } catch (Throwable ignored) {
-                try { res = cr.craft(CraftingRecipeInput.EMPTY, reg); } catch (Exception ignored2) {}
+                res = cr.craft(CraftingRecipeInput.EMPTY, reg);
+            } catch (RuntimeException dynamicResult) {
+                continue; // A modded recipe requiring actual input is not a portable recipe.
             }
             if (res.isEmpty()) continue;
             Item out = res.getItem();
@@ -235,7 +220,4 @@ public final class CraftUtil {
         for (int i = 0; i < inv.size() && i < snap.size(); i++) inv.setStack(i, snap.get(i).copy());
     }
 
-    private static void dropAtFeet(SimpleInventory inv, ItemStack overflow) {
-        // 背包满时的兜底：塞回任意能合并的空隙已失败，这里直接忽略(极少发生)。保留方法以便日后改成掉落实体。
-    }
 }

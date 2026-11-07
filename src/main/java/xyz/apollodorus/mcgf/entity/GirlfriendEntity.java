@@ -9,6 +9,7 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityPose;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.EquipmentSlot;
+import net.minecraft.entity.EntityEquipment;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ai.goal.LookAroundGoal;
 import net.minecraft.entity.ai.goal.LookAtEntityGoal;
@@ -30,6 +31,7 @@ import net.minecraft.entity.mob.HostileEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.vehicle.AbstractBoatEntity;
 import net.minecraft.inventory.SimpleInventory;
+import net.minecraft.inventory.Inventories;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -88,6 +90,14 @@ public class GirlfriendEntity extends PathAwareEntity {
     /** Synced to clients so the renderer can swap her skin between 形态一 (sweet) and 形态二 (蚀域/幻灭). */
     private static final TrackedData<Boolean> FORM_TWO =
         DataTracker.registerData(GirlfriendEntity.class, TrackedDataHandlerRegistry.BOOLEAN);
+
+    // Degrees per tick on this client entity. Tick interpolation keeps cloth independent of frame rate.
+    private float previousOutfitTurn;
+    private float outfitTurn;
+
+    public float getOutfitTurn(float tickDelta) {
+        return MathHelper.lerp(tickDelta, previousOutfitTurn, outfitTurn);
+    }
 
     private UUID ownerUuid;
     private boolean following;            // true = follow owner, false = stay / wander in place
@@ -235,7 +245,14 @@ public class GirlfriendEntity extends PathAwareEntity {
         // swing ourselves every frame (client included, where it's drawn) so the swingHand() calls in
         // mining / attacking / chopping / harvesting actually animate the arm.
         this.tickHandSwing();
-        if (!(this.getEntityWorld() instanceof ServerWorld sw)) return;
+        if (!(this.getEntityWorld() instanceof ServerWorld sw)) {
+            previousOutfitTurn = outfitTurn;
+            float headTurn = MathHelper.wrapDegrees(headYaw - lastHeadYaw);
+            float bodyTurn = MathHelper.wrapDegrees(bodyYaw - lastBodyYaw);
+            float target = Math.clamp(.7f * headTurn + .3f * bodyTurn, -16f, 16f);
+            outfitTurn = MathHelper.lerp(.35f, outfitTurn, target);
+            return;
+        }
         ACTIVE.add(this);
 
         GirlfriendConfig.Behavior b = ConfigManager.get().behavior;
@@ -662,30 +679,17 @@ public class GirlfriendEntity extends PathAwareEntity {
         // Tear down any active 蚀域 first so terrain restores and the owner's domain buff never leaks.
         if (getEntityWorld() instanceof ServerWorld) AbilityManager.endDomainFor(this);
         if (getEntityWorld() instanceof ServerWorld && ownerUuid != null) {
-            DownedManager.Snapshot snap = new DownedManager.Snapshot();
-            // 装备单独存进 snap.equipment（不再塞进可能已满的背包，免得溢出被丢弃 → 死亡掉东西）。
-            // 同时清空装备槽，免得原版死亡把这些装备掉到地上。复活时 ReviveService.restore() 会从
-            // snap.equipment 重新穿戴回来。
-            for (EquipmentSlot slot : EquipmentSlot.values()) {
-                ItemStack worn = getEquippedStack(slot);
-                if (!worn.isEmpty()) {
-                    snap.equipment.put(slot.getName(),
-                        Registries.ITEM.getId(worn.getItem()) + " " + worn.getCount());
-                    equipStack(slot, ItemStack.EMPTY);
+            DownedManager.Snapshot snap = ReviveService.snapshotOf(this);
+            if (snap != null && DownedManager.setDowned(ownerUuid, snap)) {
+                // The charm now owns this equipment. Vanilla must not drop it a second time.
+                for (EquipmentSlot slot : EquipmentSlot.values()) equipStack(slot, ItemStack.EMPTY);
+            } else {
+                // If the snapshot cannot be saved, the backpack remains recoverable in the world.
+                for (int i = 0; i < inventory.size(); i++) {
+                    ItemStack stack = inventory.removeStack(i);
+                    if (!stack.isEmpty()) dropStack((ServerWorld) getEntityWorld(), stack);
                 }
             }
-            snap.inventory = exportInventory();
-            snap.affection = affection;
-            snap.x = getX();
-            snap.y = getY();
-            snap.z = getZ();
-            if (homePos != null) {
-                snap.hasHome = true;
-                snap.homeX = homePos.getX();
-                snap.homeY = homePos.getY();
-                snap.homeZ = homePos.getZ();
-            }
-            DownedManager.setDowned(ownerUuid, snap);
 
             // Hand the owner a 重逢符 so they always have a way to bring her back.
             PlayerEntity owner = getOwner();
@@ -1083,15 +1087,29 @@ public class GirlfriendEntity extends PathAwareEntity {
             if (s.isEmpty() || !s.isOf(item)) continue;
             int take = Math.min(s.getCount(), count - given);
             ItemStack out = s.copyWithCount(take);
-            owner.giveItemStack(out);
-            s.decrement(take);
+            var bag = owner.getInventory();
+            while (!out.isEmpty()) {
+                int slot = bag.getOccupiedSlotWithRoomForStack(out);
+                if (slot < 0) slot = bag.getEmptySlot();
+                if (slot < 0) break;
+                int capacity = bag.getMaxCount(out) - bag.getStack(slot).getCount();
+                int offer = Math.min(capacity, out.getCount());
+                if (offer <= 0) break;
+                ItemStack portion = out.copyWithCount(offer);
+                bag.insertStack(slot, portion);
+                int inserted = offer - portion.getCount();
+                if (inserted <= 0) break;
+                out.decrement(inserted);
+            }
+            int accepted = take - out.getCount();
+            s.decrement(accepted);
             if (s.isEmpty()) inventory.setStack(i, ItemStack.EMPTY);
-            given += take;
+            given += accepted;
         }
         return given;
     }
 
-    // --- persistence (Codec-free string form; component data is intentionally dropped) ---
+    // --- per-world entity state, including the component-preserving backpack ---
 
     @Override
     public void writeData(WriteView view) {
@@ -1114,10 +1132,7 @@ public class GirlfriendEntity extends PathAwareEntity {
             view.putInt("GarrisonY", garrisonPos.getY());
             view.putInt("GarrisonZ", garrisonPos.getZ());
         }
-        view.putString("Inv", serializeInventory());
-        view.putString("Needs", serializeNeeds());
-        view.putString("GatherBlacklist", serializeBlacklist());
-        view.putString("Tasks", serializeTasks());
+        writeBackpack(view);
     }
 
     @Override
@@ -1137,39 +1152,44 @@ public class GirlfriendEntity extends PathAwareEntity {
         if (view.getBoolean("HasGarrison", false)) {
             garrisonPos = new BlockPos(view.getInt("GarrisonX", 0), view.getInt("GarrisonY", 0), view.getInt("GarrisonZ", 0));
         }
-        view.getOptionalString("Inv").ifPresent(this::deserializeInventory);
+        readBackpack(view);
+    }
+
+    private void writeBackpack(WriteView view) {
+        Inventories.writeData(view.get("Backpack"), inventory.getHeldStacks());
+        view.putString("Needs", serializeNeeds());
+        view.putString("GatherBlacklist", serializeBlacklist());
+        view.putString("Tasks", serializeTasks());
+    }
+
+    private void readBackpack(ReadView view) {
+        view.getOptionalReadView("Backpack").ifPresentOrElse(backpack -> {
+            inventory.clear();
+            Inventories.readData(backpack, inventory.getHeldStacks());
+        }, () -> view.getOptionalString("Inv").ifPresent(this::readLegacyInventory));
         view.getOptionalString("Needs").ifPresent(this::deserializeNeeds);
         view.getOptionalString("GatherBlacklist").ifPresent(this::deserializeBlacklist);
         view.getOptionalString("Tasks").ifPresent(this::deserializeTasks);
     }
 
-    /** Public string form of the backpack, used by the revive snapshot. */
-    public String exportInventory() { return serializeInventory(); }
-
-    /** Restore the backpack from a string produced by {@link #exportInventory()}. */
-    public void importInventory(String data) { deserializeInventory(data); }
-
-    private String serializeInventory() {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < inventory.size(); i++) {
-            ItemStack s = inventory.getStack(i);
-            if (s.isEmpty()) continue;
-            if (sb.length() > 0) sb.append(';');
-            sb.append(Registries.ITEM.getId(s.getItem())).append(' ').append(s.getCount());
-        }
-        return sb.toString();
+    void writeCharmContents(WriteView view) {
+        writeBackpack(view);
+        view.put("Equipment", EntityEquipment.CODEC, equipment);
     }
 
-    private void deserializeInventory(String data) {
+    void readCharmContents(ReadView view) {
+        readBackpack(view);
+        view.read("Equipment", EntityEquipment.CODEC).ifPresent(restored -> {
+            for (EquipmentSlot slot : EquipmentSlot.values()) equipStack(slot, restored.get(slot));
+        });
+    }
+
+    void readLegacyInventory(String data) {
         inventory.clear();
         if (data == null || data.isBlank()) return;
         for (String part : data.split(";")) {
-            String[] kv = part.trim().split(" ");
-            if (kv.length != 2) continue;
-            Item item = Registries.ITEM.get(Identifier.tryParse(kv[0]));
-            if (item == Items.AIR) continue;
-            try { inventory.addStack(new ItemStack(item, Integer.parseInt(kv[1]))); }
-            catch (NumberFormatException ignored) {}
+            ItemStack stack = ReviveService.readLegacyStack(part);
+            if (!stack.isEmpty()) inventory.addStack(stack);
         }
     }
 
@@ -1281,7 +1301,9 @@ public class GirlfriendEntity extends PathAwareEntity {
 
         public final Kind kind;
         public final Item item;   // for OBTAIN
-        public int remaining;     // remaining count (HARVEST ignores it)
+        public int remaining;     // outstanding delivery count for OBTAIN; blocks for CHOP/MINE
+        public String step = "";  // current work or missing ingredient; rebuilt from inventory after load
+        public String reportedDelay = "";
 
         private Task(Kind kind, Item item, int remaining) {
             this.kind = kind;
@@ -1300,7 +1322,7 @@ public class GirlfriendEntity extends PathAwareEntity {
                 case MINE -> "挖矿 ×" + remaining;
                 case CHOP -> "砍树 ×" + remaining;
                 case HARVEST -> "收庄稼";
-                case OBTAIN -> "收集 " + WorkUtil.displayName(item) + " ×" + remaining;
+                case OBTAIN -> "交付 " + WorkUtil.displayName(item) + " ×" + remaining + (step.isEmpty() ? "" : " · " + step);
             };
         }
     }

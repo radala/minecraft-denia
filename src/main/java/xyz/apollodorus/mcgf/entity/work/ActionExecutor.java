@@ -136,49 +136,4 @@ public final class ActionExecutor {
         }
         return false;
     }
-
-    public static boolean buildSimpleShelter(GirlfriendEntity gf) {
-        if (gf == null) return false;
-        ServerWorld sw = (ServerWorld) gf.getEntityWorld();
-        Item blockItem = null;
-        for (int i = 0; i < gf.getInventory().size(); i++) {
-            ItemStack st = gf.getInventory().getStack(i);
-            if (!st.isEmpty() && st.getItem() instanceof BlockItem bi) {
-                if (bi.getBlock().getDefaultState().isOpaque() && st.getCount() >= 10) {
-                    blockItem = st.getItem();
-                    break;
-                }
-            }
-        }
-        if (blockItem == null) return false;
-
-        BlockPos center = gf.getBlockPos();
-        int placed = 0;
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dz = -1; dz <= 1; dz++) {
-                if (dx == 0 && dz == 0) continue;
-                for (int dy = 0; dy <= 2; dy++) {
-                    if (dx == 0 && dz == 1 && dy < 2) continue; // 留门
-                    BlockPos p = center.add(dx, dy, dz);
-                    if (placeBlockAt(gf, p, blockItem)) {
-                        placed++;
-                    }
-                }
-            }
-        }
-        // 屋顶
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dz = -1; dz <= 1; dz++) {
-                BlockPos p = center.add(dx, 3, dz);
-                if (placeBlockAt(gf, p, blockItem)) {
-                    placed++;
-                }
-            }
-        }
-        if (placed > 0) {
-            SpeechBus.speak(gf, "临时避难小棚搭建完成！");
-            return true;
-        }
-        return false;
-    }
 }

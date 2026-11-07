@@ -9,13 +9,16 @@ import org.slf4j.LoggerFactory;
 import xyz.apollodorus.mcgf.entity.GirlfriendEntity;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -45,6 +48,7 @@ public final class MemoryStore {
     private static final class Entry {
         volatile String memory = "";
         final Deque<String> episodes = new ArrayDeque<>();
+        JourneyMemories.Birthday birthday;
         long lastRecordTick = Long.MIN_VALUE;
     }
 
@@ -52,13 +56,18 @@ public final class MemoryStore {
     private static final class Data {
         String memory = "";
         List<String> episodes = new ArrayList<>();
+        JourneyMemories.Birthday birthday;
     }
 
     /** Bind to the running server's save directory. Call on server start; safe to call again. */
     public static void init(MinecraftServer server) {
+        init(server.getSavePath(WorldSavePath.ROOT));
+    }
+
+    static void init(Path world) {
+        dir = null;
         try {
-            dir = server.getSavePath(WorldSavePath.ROOT).resolve("mcgf-memory");
-            Files.createDirectories(dir);
+            dir = Files.createDirectories(world.resolve("mcgf-memory"));
         } catch (Exception e) {
             LOGGER.warn("[mcgf] memory dir init failed: {}", e.toString());
         }
@@ -74,8 +83,27 @@ public final class MemoryStore {
     public static void setMemory(UUID owner, String memory) {
         if (owner == null) return;
         Entry e = entry(owner);
-        e.memory = memory == null ? "" : memory;
-        save(owner, e);
+        synchronized (e) {
+            e.memory = memory == null ? "" : memory;
+            save(owner, e);
+        }
+    }
+
+    static JourneyMemories.Birthday birthday(UUID owner) {
+        if (owner == null) return null;
+        Entry e = entry(owner);
+        synchronized (e) { return e.birthday; }
+    }
+
+    static boolean updateBirthday(UUID owner, JourneyMemories.Birthday expected, JourneyMemories.Birthday next) {
+        Entry e = entry(owner);
+        synchronized (e) {
+            if (!Objects.equals(expected, e.birthday)) return false;
+            e.birthday = next;
+            if (save(owner, e)) return true;
+            e.birthday = expected;
+            return false;
+        }
     }
 
     // --- episodic "shared experiences" ---
@@ -84,7 +112,7 @@ public final class MemoryStore {
     public static List<String> episodes(UUID owner) {
         if (owner == null) return List.of();
         Entry e = entry(owner);
-        synchronized (e.episodes) { return new ArrayList<>(e.episodes); }
+        synchronized (e) { return new ArrayList<>(e.episodes); }
     }
 
     /**
@@ -97,8 +125,9 @@ public final class MemoryStore {
         if (owner == null) return;
         long now = gf.getEntityWorld().getTime();
         Entry e = entry(owner);
-        synchronized (e.episodes) {
-            if (now - e.lastRecordTick < RECORD_MIN_GAP) return;         // 防抖：太密的重复触发忽略
+        synchronized (e) {
+            if (e.lastRecordTick != Long.MIN_VALUE && now >= e.lastRecordTick
+                    && now - e.lastRecordTick < RECORD_MIN_GAP) return;
             int seen = 0;
             for (var it = e.episodes.descendingIterator(); it.hasNext() && seen < 3; seen++) {
                 if (line.equals(it.next())) return;                     // 和最近几条重复 → 跳过
@@ -106,13 +135,15 @@ public final class MemoryStore {
             e.episodes.addLast(line);
             while (e.episodes.size() > EPISODE_MAX) e.episodes.removeFirst();
             e.lastRecordTick = now;
+            save(owner, e);
         }
-        save(owner, e);
     }
 
     /** Flush every cached owner to disk (call on server stop). */
     public static void flush() {
-        for (Map.Entry<UUID, Entry> en : CACHE.entrySet()) save(en.getKey(), en.getValue());
+        for (Map.Entry<UUID, Entry> en : CACHE.entrySet()) {
+            synchronized (en.getValue()) { save(en.getKey(), en.getValue()); }
+        }
     }
 
     // --- internals ---
@@ -129,6 +160,9 @@ public final class MemoryStore {
             Data d = GSON.fromJson(Files.readString(f, StandardCharsets.UTF_8), Data.class);
             if (d != null) {
                 e.memory = d.memory == null ? "" : d.memory;
+                if (d.birthday != null && d.birthday.dimension() != null && d.birthday.visit() != null) {
+                    e.birthday = d.birthday;
+                }
                 if (d.episodes != null) {
                     for (String s : d.episodes) if (s != null && !s.isBlank()) e.episodes.addLast(s);
                     while (e.episodes.size() > EPISODE_MAX) e.episodes.removeFirst();
@@ -140,17 +174,30 @@ public final class MemoryStore {
         return e;
     }
 
-    private static void save(UUID owner, Entry e) {
+    private static boolean save(UUID owner, Entry e) {
         Path f = fileOf(owner);
-        if (f == null) return;   // 服务器还没绑定存档目录：只留在内存里
+        if (f == null) return false;
         Data d = new Data();
         d.memory = e.memory;
-        synchronized (e.episodes) { d.episodes = new ArrayList<>(e.episodes); }
+        d.episodes = new ArrayList<>(e.episodes);
+        d.birthday = e.birthday;
         try {
             Files.createDirectories(f.getParent());
-            Files.writeString(f, GSON.toJson(d), StandardCharsets.UTF_8);
+            Path tmp = Files.createTempFile(f.getParent(), owner.toString(), ".tmp");
+            try {
+                Files.writeString(tmp, GSON.toJson(d), StandardCharsets.UTF_8);
+                try {
+                    Files.move(tmp, f, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                } catch (AtomicMoveNotSupportedException ex) {
+                    Files.move(tmp, f, StandardCopyOption.REPLACE_EXISTING);
+                }
+            } finally {
+                Files.deleteIfExists(tmp);
+            }
+            return true;
         } catch (Exception ex) {
             LOGGER.warn("[mcgf] failed to save memory for {}: {}", owner, ex.toString());
+            return false;
         }
     }
 

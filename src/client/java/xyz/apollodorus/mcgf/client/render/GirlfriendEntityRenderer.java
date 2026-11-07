@@ -18,6 +18,7 @@ public class GirlfriendEntityRenderer
 
     public GirlfriendEntityRenderer(EntityRendererFactory.Context ctx) {
         super(ctx, new GirlfriendEntityModel(ctx.getPart(ModEntityModelLayers.GIRLFRIEND)), 0.5f);
+        addFeature(new DomainOutfitFeature(this, ctx.getResourceManager()));
     }
 
     @Override
@@ -29,6 +30,7 @@ public class GirlfriendEntityRenderer
     public void updateRenderState(GirlfriendEntity entity, GirlfriendRenderState state, float tickDelta) {
         super.updateRenderState(entity, state, tickDelta);
         state.formTwo = entity.isFormTwo();
+        state.outfitTurn = entity.getOutfitTurn(tickDelta);
     }
 
     @Override

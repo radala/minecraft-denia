@@ -1,0 +1,83 @@
+def portGame = projectDir.parentFile.name
+def game = providers.gradleProperty('testGame').getOrElse(portGame)
+def targets = [
+    '1.21.1': ['1.21.1+build.3', '0.116.14+1.21.1'],
+    '1.21'  : ['1.21+build.9', '0.102.0+1.21'],
+    '1.20.1': ['1.20.1+build.10', '0.92.6+1.20.1']
+]
+if (game != portGame && !(portGame == '1.21.1' && game == '1.21')) {
+    throw new GradleException("Unsupported test target ${game} for ${portGame}")
+}
+def runtime = game == '1.20.1' ? 17 : 21
+def common = new Properties()
+file('../../../gradle.properties').withInputStream { common.load(it) }
+def portJar = file("../build/libs/denia-fabric-${portGame}-${common.mod_version}.jar")
+if (!portJar.isFile()) throw new GradleException("Build the release JAR in ports/${portGame} first.")
+def api = "net.fabricmc.fabric-api:fabric-api:${targets[game][1]}"
+version = '1'
+layout.buildDirectory = file("build/${game}")
+loom {
+    splitEnvironmentSourceSets()
+    mods {
+        denia_port_tests {
+            sourceSet sourceSets.main
+            sourceSet sourceSets.client
+        }
+    }
+}
+sourceSets.main.java.srcDir(file('../../verification-shared/src/main/java'))
+sourceSets.client.java.srcDir(file('../../verification-shared/src/client/java'))
+configurations { releaseApi { transitive = false } }
+dependencies {
+    minecraft "com.mojang:minecraft:${game}"
+    mappings "net.fabricmc:yarn:${targets[game][0]}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${common.loader_version}"
+    modImplementation api
+    modImplementation files(portJar)
+    releaseApi api
+    releaseApi fabricApi.module('fabric-gametest-api-v1', targets[game][1])
+}
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = runtime
+}
+def testJvm = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(runtime) }
+tasks.named('verifyReleaseServer') {
+    outputs.upToDateWhen { false }
+    installerVersion = '1.1.1'
+    javaLauncher = testJvm
+    mods.setFrom(tasks.named('remapJar'), portJar, configurations.releaseApi)
+    runDir = layout.buildDirectory.dir('server')
+    jvmArgs.add('-Dfabric-api.gametest')
+    jvmArgs.add("-Dfabric-api.gametest.report-file=${layout.buildDirectory.file('gametest.xml').get().asFile.absolutePath}")
+    programArgs.add('nogui')
+    def report = layout.buildDirectory.file('gametest.xml')
+    doFirst { report.get().asFile.delete() }
+    doLast {
+        def xml = javax.xml.parsers.DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(report.get().asFile)
+        def cases = xml.getElementsByTagName('testcase')
+        if (cases.length == 0 || xml.getElementsByTagName('failure').length || xml.getElementsByTagName('error').length) {
+            throw new GradleException("Incomplete or failing GameTests for ${game}")
+        }
+        logger.lifecycle("Verified ${cases.length} server GameTests on ${game}")
+    }
+}
+tasks.named('verifyReleaseClient') {
+    outputs.upToDateWhen { false }
+    javaLauncher = testJvm
+    mods.setFrom(tasks.named('remapJar'), portJar, configurations.releaseApi)
+    runDir = layout.buildDirectory.dir('client')
+    jvmArgs.add('-Xmx2G')
+    def passed = layout.buildDirectory.file('client/probe-evidence/passed.txt')
+    def voice = layout.buildDirectory.file('client/probe-evidence/voice-passed.txt')
+    doFirst {
+        passed.get().asFile.delete()
+        voice.get().asFile.delete()
+    }
+    doLast {
+        if (!passed.get().asFile.isFile() || !voice.get().asFile.isFile()) {
+            throw new GradleException("Client or voice probe did not complete for ${game}.")
+        }
+    }
+}

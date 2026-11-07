@@ -3,7 +3,7 @@
   "id": "mcgf",
   "version": "${version}",
   "name": "Denia",
-  "description": "由 LLM 驱动的 Minecraft 伴随实体「达妮娅」：会撒娇、挖矿、收菜、战斗护卫、陪你探索，支持 GPT-SoVITS 语音。",
+  "description": "和达妮娅一起旅行、扎营和战斗。她能记住共同经历、接受生存委托，支持本地按键听写与 Breeze、GPT-SoVITS 朗读。",
   "authors": [
     "avilliai"
   ],

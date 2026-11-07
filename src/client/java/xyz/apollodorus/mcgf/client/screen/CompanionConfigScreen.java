@@ -162,8 +162,8 @@ public class CompanionConfigScreen extends Screen {
         label(ctx, llmKey, "LLM 密钥 apiKey");
         label(ctx, llmModel, "对话模型 model");
         label(ctx, ttsUrl, "TTS 地址 url");
-        label(ctx, ttsRef, "参考音频 refAudio");
-        label(ctx, ttsPrompt, "参考文本 promptText");
+        label(ctx, ttsRef, "SoVITS 参考音频");
+        label(ctx, ttsPrompt, "SoVITS 参考文本");
     }
 
     private void label(DrawContext ctx, TextFieldWidget f, String text) {

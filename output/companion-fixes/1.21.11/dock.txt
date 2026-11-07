@@ -1,0 +1,7 @@
+Minecraft Java 1.21.11 / Fabric GameTest. Same survival player, owned companion and two separate oak boats on water.
+before: nearDistance=2.0 nearPassengers=2 villagers, farDistance=5.02289342880249 farPassengers=0, companionOnFoot=true
+player /denia boat with full near boat: companionOnFoot=false nearPassengers=2 farPassengers=1
+post-fix: same two villagers still seated=true, companion occupies the original far boat=true
+PASS: one player request boarded the available boat while the full boat remained in place.
+Server chat captured during the command:
+[09:36:48] [Server thread/INFO] (Minecraft) <达妮娅> 上船咯~

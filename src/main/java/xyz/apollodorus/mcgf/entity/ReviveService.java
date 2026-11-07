@@ -1,10 +1,20 @@
 package xyz.apollodorus.mcgf.entity;
 
+import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.SpawnReason;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.nbt.NbtCompound;
+import net.minecraft.nbt.StringNbtReader;
+import net.minecraft.registry.Registries;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.storage.NbtReadView;
+import net.minecraft.storage.NbtWriteView;
+import net.minecraft.util.ErrorReporter;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import xyz.apollodorus.mcgf.MCGirlfriendMod;
 
@@ -36,8 +46,10 @@ public final class ReviveService {
         if (snap == null) return null;
         GirlfriendEntity gf = spawn(world, owner);
         if (gf == null) return null;
-        restore(gf, owner, snap, /*restoreHealth=*/ false);
-        DownedManager.clearDowned(owner.getUuid());
+        if (!restore(gf, owner, snap, false) || !DownedManager.clearDowned(owner.getUuid())) {
+            gf.discard();
+            return null;
+        }
         // 复活语音多样化（基于游戏内语音风格）
         String[] revivePrompts = {
             "你刚刚倒下、又被玩家用力量带了回来。向他真诚道谢，表达失而复得的感动与依赖。",
@@ -58,8 +70,10 @@ public final class ReviveService {
         if (snap == null) return null;
         GirlfriendEntity gf = spawn(world, owner);
         if (gf == null) return null;
-        restore(gf, owner, snap, /*restoreHealth=*/ true);
-        DownedManager.clearStored(owner.getUuid());
+        if (!restore(gf, owner, snap, true) || !DownedManager.clearStored(owner.getUuid())) {
+            gf.discard();
+            return null;
+        }
 
         // 检查冷却时间：频繁释放时不触发语音
         UUID ownerId = owner.getUuid();
@@ -89,7 +103,8 @@ public final class ReviveService {
         xyz.apollodorus.mcgf.combat.AbilityManager.endDomainFor(gf);
         gf.setFormTwo(false);
         gf.setNoGravity(false);
-        DownedManager.setStored(owner.getUuid(), snapshotOf(gf));
+        DownedManager.Snapshot snapshot = snapshotOf(gf);
+        if (snapshot == null || !DownedManager.setStored(owner.getUuid(), snapshot)) return false;
 
         // 检查冷却时间：频繁收回时不触发语音
         UUID ownerId = owner.getUuid();
@@ -117,34 +132,31 @@ public final class ReviveService {
         return gf;
     }
 
-
-    private static String itemToString(ItemStack stack) {
-        return net.minecraft.registry.Registries.ITEM.getId(stack.getItem()) + " " + stack.getCount();
-    }
-
-    private static ItemStack itemFromString(String data) {
-        String[] kv = data.split(" ");
+    static ItemStack readLegacyStack(String data) {
+        String[] kv = data.trim().split("\\s+");
         if (kv.length != 2) return ItemStack.EMPTY;
-        net.minecraft.item.Item item = net.minecraft.registry.Registries.ITEM
-            .get(net.minecraft.util.Identifier.tryParse(kv[0]));
-        if (item == net.minecraft.item.Items.AIR) return ItemStack.EMPTY;
+        Identifier id = Identifier.tryParse(kv[0]);
+        if (id == null) return ItemStack.EMPTY;
+        Item item = Registries.ITEM.get(id);
+        if (item == Items.AIR) return ItemStack.EMPTY;
         try {
             return new ItemStack(item, Integer.parseInt(kv[1]));
         } catch (NumberFormatException e) {
             return ItemStack.EMPTY;
         }
     }
-    /** Snapshot a live companion (folding her worn gear into the backpack so it travels along). */
-    private static DownedManager.Snapshot snapshotOf(GirlfriendEntity gf) {
+
+    /** Both capture and death use the same registry-aware representation, including slot indexes. */
+    static DownedManager.Snapshot snapshotOf(GirlfriendEntity gf) {
         DownedManager.Snapshot snap = new DownedManager.Snapshot();
-        // 单独保存装备栏，不动背包
-        for (EquipmentSlot slot : EquipmentSlot.values()) {
-            ItemStack worn = gf.getEquippedStack(slot);
-            if (!worn.isEmpty()) {
-                snap.equipment.put(slot.getName(), itemToString(worn));
-            }
+        ErrorReporter.Impl errors = new ErrorReporter.Impl();
+        NbtWriteView view = NbtWriteView.create(errors, gf.getEntityWorld().getRegistryManager());
+        gf.writeCharmContents(view);
+        if (!errors.isEmpty()) {
+            MCGirlfriendMod.LOGGER.warn("[mcgf] Cannot encode companion belongings: {}", errors.getErrorsAsString());
+            return null;
         }
-        snap.inventory = gf.exportInventory();
+        snap.belongings = view.getNbt().toString();
         snap.affection = gf.getAffection();
         snap.health = gf.getHealth();
         snap.x = gf.getX(); snap.y = gf.getY(); snap.z = gf.getZ();
@@ -156,7 +168,7 @@ public final class ReviveService {
         return snap;
     }
 
-    private static void restore(GirlfriendEntity gf, ServerPlayerEntity owner,
+    private static boolean restore(GirlfriendEntity gf, ServerPlayerEntity owner,
                                 DownedManager.Snapshot snap, boolean restoreHealth) {
         gf.setOwnerUuid(owner.getUuid());
         gf.setFollowing(true);
@@ -164,21 +176,41 @@ public final class ReviveService {
         gf.setFormTwo(false);
         gf.setNoGravity(false);
         gf.setEnergy(0);
-        gf.importInventory(snap.inventory);
         gf.setAffection(snap.affection);
         if (snap.hasHome) gf.setHomePos(new BlockPos(snap.homeX, snap.homeY, snap.homeZ));
         if (restoreHealth && snap.health > 0.0) {
             gf.setHealth((float) Math.min(snap.health, gf.getMaxHealth()));
         }
-        // 还原装备栏
+        if (snap.belongings != null) {
+            ErrorReporter.Impl errors = new ErrorReporter.Impl();
+            try {
+                NbtCompound contents = StringNbtReader.readCompound(snap.belongings);
+                if (contents.getCompound("Backpack").flatMap(tag -> tag.getList("Items")).isEmpty()
+                    || contents.getCompound("Equipment").isEmpty()) {
+                    MCGirlfriendMod.LOGGER.warn("[mcgf] Incomplete companion belongings; keeping the charm snapshot");
+                    return false;
+                }
+                gf.readCharmContents(NbtReadView.create(errors, gf.getEntityWorld().getRegistryManager(), contents));
+            } catch (CommandSyntaxException e) {
+                MCGirlfriendMod.LOGGER.warn("[mcgf] Cannot read companion belongings; keeping the charm snapshot");
+                return false;
+            }
+            if (!errors.isEmpty()) {
+                MCGirlfriendMod.LOGGER.warn("[mcgf] Cannot restore companion belongings: {}", errors.getErrorsAsString());
+                return false;
+            }
+            return true;
+        }
+        gf.readLegacyInventory(snap.inventory);
         if (snap.equipment != null) {
             for (EquipmentSlot slot : EquipmentSlot.values()) {
                 String data = snap.equipment.get(slot.getName());
                 if (data != null) {
-                    gf.equipStack(slot, itemFromString(data));
+                    gf.equipStack(slot, readLegacyStack(data));
                 }
             }
         }
+        return true;
     }
 
     private static void speak(GirlfriendEntity gf, String situation) {

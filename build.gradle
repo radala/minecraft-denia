@@ -36,6 +36,20 @@ dependencies {
 	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
 }
 
+fabricApi.configureTests {
+	createSourceSet = true
+	modId = 'denia_tests'
+	enableGameTests = true
+	enableClientGameTests = true
+}
+
+sourceSets.gametest.compileClasspath += sourceSets.client.compileClasspath + sourceSets.client.output
+
+loom.runs.named('clientGameTest') {
+	// Vanilla screen handlers and the custom payloads use different network dispatch paths.
+	vmArg '-Dfabric.client.gametest.disableNetworkSynchronizer'
+}
+
 processResources {
 	inputs.property "version", project.version
 

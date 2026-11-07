@@ -3,6 +3,7 @@ package xyz.apollodorus.mcgf.command;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.entity.SpawnReason;
 import net.minecraft.item.Item;
 import net.minecraft.server.command.CommandManager;
@@ -10,6 +11,8 @@ import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.text.Text;
+import xyz.apollodorus.mcgf.ai.JourneyMemories;
+import xyz.apollodorus.mcgf.ai.MemoryStore;
 import xyz.apollodorus.mcgf.ai.SpeechBus;
 import xyz.apollodorus.mcgf.config.ConfigManager;
 import xyz.apollodorus.mcgf.entity.GirlfriendEntities;
@@ -17,7 +20,9 @@ import xyz.apollodorus.mcgf.entity.GirlfriendEntity;
 import xyz.apollodorus.mcgf.entity.GirlfriendEntity.Task;
 import xyz.apollodorus.mcgf.entity.goal.WorkGoal;
 import xyz.apollodorus.mcgf.entity.work.BoatUtil;
+import xyz.apollodorus.mcgf.entity.work.TravelCamp;
 import xyz.apollodorus.mcgf.entity.work.WorkUtil;
+import xyz.apollodorus.mcgf.net.JournalPayload;
 import xyz.apollodorus.mcgf.util.GfFinder;
 
 /** /gf (alias /mcgf) summon|come|follow|stop|reload|mine|chop|harvest|obtain|give|home|guard|gather|wood|boat|dismount|store|release|revive|status|debug|say */
@@ -28,6 +33,8 @@ public final class GfCommands {
         net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback.EVENT.register(
             (dispatcher, registryAccess, environment) -> {
                 var root = dispatcher.register(CommandManager.literal("denia")
+                    .then(CommandManager.literal("journal").executes(GfCommands::journal))
+                    .then(CommandManager.literal("camp").executes(GfCommands::camp))
                     .then(CommandManager.literal("summon").executes(GfCommands::summon))
                     .then(CommandManager.literal("come").executes(GfCommands::come))
                     .then(CommandManager.literal("follow").executes(GfCommands::follow))
@@ -66,15 +73,11 @@ public final class GfCommands {
                     .then(CommandManager.literal("ult").executes(GfCommands::ult))
                     .then(CommandManager.literal("beacon").executes(GfCommands::beacon))
                     .then(CommandManager.literal("obtain")
-                        .then(CommandManager.argument("item", StringArgumentType.string())
-                            .executes(ctx -> obtain(ctx, 1))
-                            .then(CommandManager.argument("count", IntegerArgumentType.integer(1, 256))
-                                .executes(ctx -> obtain(ctx, IntegerArgumentType.getInteger(ctx, "count"))))))
+                        .then(CommandManager.argument("itemAndCount", StringArgumentType.greedyString())
+                            .executes(ctx -> itemCommand(ctx, true))))
                     .then(CommandManager.literal("give")
-                        .then(CommandManager.argument("item", StringArgumentType.string())
-                            .executes(ctx -> give(ctx, Integer.MAX_VALUE))
-                            .then(CommandManager.argument("count", IntegerArgumentType.integer(1, 256))
-                                .executes(ctx -> give(ctx, IntegerArgumentType.getInteger(ctx, "count"))))))
+                        .then(CommandManager.argument("itemAndCount", StringArgumentType.greedyString())
+                            .executes(ctx -> itemCommand(ctx, false))))
                     .then(CommandManager.literal("say")
                         .then(CommandManager.argument("text", StringArgumentType.greedyString())
                             .executes(GfCommands::say))));
@@ -86,6 +89,36 @@ public final class GfCommands {
 
     private static int defCount() {
         return ConfigManager.get().behavior.defaultGatherCount;
+    }
+
+    private static int journal(CommandContext<ServerCommandSource> ctx) {
+        ServerPlayerEntity player = ctx.getSource().getPlayer();
+        if (player == null) return 0;
+        var events = MemoryStore.episodes(player.getUuid());
+        String birthday = JourneyMemories.cakeJournalLine(player.getUuid());
+        StringBuilder page = new StringBuilder("我和达妮娅的旅行手记");
+        if (birthday != null) page.append("\n★ ").append(birthday);
+        for (String event : events) page.append("\n· ").append(event);
+        if (birthday == null && events.isEmpty()) page.append("\n还没有记录。我们一起去走走吧。");
+        if (page.length() <= 32767 && ServerPlayNetworking.canSend(player, JournalPayload.ID)) {
+            ServerPlayNetworking.send(player, new JournalPayload(page.toString()));
+        } else {
+            player.sendMessage(Text.literal(page.toString()), false);
+        }
+        return 1;
+    }
+
+    private static int camp(CommandContext<ServerCommandSource> ctx) {
+        ServerPlayerEntity player = ctx.getSource().getPlayer();
+        if (player == null) return 0;
+        GirlfriendEntity gf = GfFinder.nearest(player, 8);
+        if (gf == null || !gf.isOwner(player)) {
+            ctx.getSource().sendError(Text.literal("先和自己的达妮娅一起走到营地选址旁。"));
+            return 0;
+        }
+        TravelCamp.Result result = TravelCamp.build(gf, true);
+        SpeechBus.speak(gf, result.message());
+        return result.complete() ? 1 : 0;
     }
 
     private static int summon(CommandContext<ServerCommandSource> ctx) {
@@ -133,37 +166,41 @@ public final class GfCommands {
         return 1;
     }
 
-    private static int obtain(CommandContext<ServerCommandSource> ctx, int count) {
-        GirlfriendEntity gf = require(ctx);
-        if (gf == null) return 0;
-        Item item = WorkUtil.resolveItem(StringArgumentType.getString(ctx, "item"));
+    /** Brigadier's word parser stops at a colon or a Chinese character; both are valid item input here. */
+    private static int itemCommand(CommandContext<ServerCommandSource> ctx, boolean obtain)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        var reader = new com.mojang.brigadier.StringReader(StringArgumentType.getString(ctx, "itemAndCount").trim());
+        String name;
+        if (reader.canRead() && com.mojang.brigadier.StringReader.isQuotedStringStart(reader.peek())) {
+            name = reader.readQuotedString();
+        } else {
+            while (reader.canRead() && !Character.isWhitespace(reader.peek())) reader.skip();
+            name = reader.getRead();
+        }
+        reader.skipWhitespace();
+        int count = reader.canRead() ? IntegerArgumentType.integer(1, 256).parse(reader) : (obtain ? 1 : Integer.MAX_VALUE);
+        reader.skipWhitespace();
+        if (reader.canRead()) {
+            ctx.getSource().sendError(Text.literal("用法：物品名 [1 到 256 的数量]"));
+            return 0;
+        }
+        Item item = WorkUtil.resolveItem(name);
         if (item == null) {
             ctx.getSource().sendError(Text.literal("不认识这个物品。"));
             return 0;
         }
-        int have = gf.countItem(item);
-        int given = have > 0 ? gf.giveToOwner(item, Math.min(have, count)) : 0;
-        int remaining = count - given;
-        if (remaining <= 0) { SpeechBus.speak(gf, "给你~"); return 1; }
-        Task t = Task.obtain(item, remaining);
-        if (!WorkGoal.isGettable(t)) { SpeechBus.speak(gf, "这个我还不会弄到呢，抱歉嘛~"); return 1; }
-        boolean nearby = WorkGoal.hasNearbyTarget(gf, t);
-        gf.enqueueTask(t);
-        SpeechBus.speak(gf, nearby ? "我去给你弄" + WorkUtil.displayName(item) + "~"
-                                   : "附近没有" + WorkUtil.displayName(item) + "，我先记下来，有机会就去弄~");
-        return 1;
-    }
-
-    private static int give(CommandContext<ServerCommandSource> ctx, int count) {
         GirlfriendEntity gf = require(ctx);
         if (gf == null) return 0;
-        Item item = WorkUtil.resolveItem(StringArgumentType.getString(ctx, "item"));
-        if (item == null) {
-            ctx.getSource().sendError(Text.literal("不认识这个物品。"));
-            return 0;
+        if (!obtain) {
+            int given = gf.giveToOwner(item, count);
+            SpeechBus.speak(gf, given > 0 ? "给你~" : "我没有可以交给你的，或是你的背包满了。");
+            return 1;
         }
-        int given = gf.giveToOwner(item, count);
-        SpeechBus.speak(gf, given > 0 ? "给你~" : "我背包里没有这个呢…");
+        WorkGoal.OrderReceipt order = WorkGoal.requestItem(gf, item, count);
+        String itemName = WorkUtil.displayName(item);
+        if (order.queued() > 0) SpeechBus.speak(gf, "记下了，剩下的 " + order.queued() + " 个" + itemName + "备好就给你。");
+        else if (order.supported()) SpeechBus.speak(gf, "你要的" + itemName + "，给你。");
+        else SpeechBus.speak(gf, "剩下的" + itemName + "我暂时没法弄到。");
         return 1;
     }
 
@@ -210,7 +247,10 @@ public final class GfCommands {
             ctx.getSource().sendError(Text.literal("附近没有你的达妮娅。"));
             return 0;
         }
-        xyz.apollodorus.mcgf.entity.ReviveService.capture(player, gf);
+        if (!xyz.apollodorus.mcgf.entity.ReviveService.capture(player, gf)) {
+            ctx.getSource().sendError(Text.literal("这次没能保存行囊，达妮娅还在你身边。"));
+            return 0;
+        }
         ctx.getSource().sendFeedback(() -> Text.literal("已把达妮娅收进重逢符。"), false);
         return 1;
     }

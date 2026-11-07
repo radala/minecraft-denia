@@ -21,7 +21,8 @@ import xyz.apollodorus.mcgf.config.GirlfriendConfig;
 import xyz.apollodorus.mcgf.entity.GirlfriendEntity;
 import xyz.apollodorus.mcgf.entity.GirlfriendEntity.Task;
 import xyz.apollodorus.mcgf.entity.work.WorkUtil;
-import xyz.apollodorus.mcgf.entity.work.SmeltUtil;
+import xyz.apollodorus.mcgf.entity.work.SupplyOrder;
+import net.minecraft.item.ItemStack;
 
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -57,6 +58,9 @@ public class WorkGoal extends Goal {
     private int repathCd;
     private int rescanCd;
     private int stuckTicks;
+    private long nextQueueScan;
+    private long nextOrderNotice;
+    private Task workingOn;
 
     // mining-in-progress state (vanilla-paced, with block-cracking feedback)
     private double breakProgress;
@@ -70,7 +74,7 @@ public class WorkGoal extends Goal {
         Map.entry(Items.COAL, Set.of(Blocks.COAL_ORE, Blocks.DEEPSLATE_COAL_ORE)),
         Map.entry(Items.RAW_IRON, Set.of(Blocks.IRON_ORE, Blocks.DEEPSLATE_IRON_ORE)),
         Map.entry(Items.RAW_COPPER, Set.of(Blocks.COPPER_ORE, Blocks.DEEPSLATE_COPPER_ORE)),
-        Map.entry(Items.RAW_GOLD, Set.of(Blocks.GOLD_ORE, Blocks.DEEPSLATE_GOLD_ORE, Blocks.NETHER_GOLD_ORE)),
+        Map.entry(Items.RAW_GOLD, Set.of(Blocks.GOLD_ORE, Blocks.DEEPSLATE_GOLD_ORE)),
         Map.entry(Items.DIAMOND, Set.of(Blocks.DIAMOND_ORE, Blocks.DEEPSLATE_DIAMOND_ORE)),
         Map.entry(Items.EMERALD, Set.of(Blocks.EMERALD_ORE, Blocks.DEEPSLATE_EMERALD_ORE)),
         Map.entry(Items.REDSTONE, Set.of(Blocks.REDSTONE_ORE, Blocks.DEEPSLATE_REDSTONE_ORE)),
@@ -79,7 +83,7 @@ public class WorkGoal extends Goal {
         // 方块掉落物 ≠ 方块本身的常见情况：让她明白要去挖什么。
         Map.entry(Items.COBBLESTONE, Set.of(Blocks.STONE)),
         Map.entry(Items.COBBLED_DEEPSLATE, Set.of(Blocks.DEEPSLATE)),
-        Map.entry(Items.DIRT, Set.of(Blocks.DIRT, Blocks.GRASS_BLOCK, Blocks.COARSE_DIRT, Blocks.ROOTED_DIRT)),
+        Map.entry(Items.DIRT, Set.of(Blocks.DIRT, Blocks.GRASS_BLOCK)),
         Map.entry(Items.FLINT, Set.of(Blocks.GRAVEL)),
         Map.entry(Items.WHEAT, Set.of(Blocks.WHEAT)),
         Map.entry(Items.CARROT, Set.of(Blocks.CARROTS)),
@@ -129,6 +133,7 @@ public class WorkGoal extends Goal {
         this.breakProgress = 0;
         this.lastStage = -1;
         this.stuckTicks = 0;
+        this.workingOn = gf.getTask();
         gf.setIdleWorking(gf.getTask() == null); // 空闲采集 → 专心干活，跟随让位（指令任务本就让位）
         gf.setActivity(activityLabel());
     }
@@ -146,7 +151,13 @@ public class WorkGoal extends Goal {
     public void tick() {
         if (!(gf.getEntityWorld() instanceof ServerWorld sw)) return;
         long now = sw.getTime();
+        if (gf.getTask() == null && !gf.getTasks().isEmpty()) pickActiveTask();
         Task active = gf.getTask();
+        if (workingOn != active) {
+            resetMining(sw);
+            target = null;
+            workingOn = active;
+        }
         gf.setActivity(activityLabel());
         if (active != null) gf.setIdleWorking(false); // 有指令任务时不算空闲采集
 
@@ -154,11 +165,15 @@ public class WorkGoal extends Goal {
             if (--rescanCd > 0) return;
             rescanCd = 8;
             resetMining(sw);
-            target = (active != null) ? findTargetFor(active) : findIdleTarget();
+            if (active != null && active.kind == Task.Kind.OBTAIN) {
+                target = orderTarget(active);
+            } else {
+                target = active == null ? findIdleTarget() : findTargetFor(active);
+            }
             if (active == null) gf.setIdleWorking(target != null); // 空闲采集：有活就专心干，没活就放手
             stuckTicks = 0;
             if (target == null) {
-                if (active != null) onActiveNoTarget(active);
+                if (active != null && active == gf.getTask()) onActiveNoTarget(active);
                 return;
             }
         }
@@ -196,12 +211,11 @@ public class WorkGoal extends Goal {
 
         WorkUtil.ToolKind kind = WorkUtil.toolFor(st);
         // 智能工具检查与自动合成：如果缺少相应工具，尝试从背包原料现场合成工作台与斧/镐
-        checkAndCraftNeededTool(kind);
+        if (active == null || active.kind != Task.Kind.OBTAIN) checkAndCraftNeededTool(kind);
 
         if (kind == WorkUtil.ToolKind.PICKAXE && WorkUtil.isOre(st)
             && !WorkUtil.hasTool(gf, WorkUtil.ToolKind.PICKAXE)) {
-            if (active != null && (active.kind == Task.Kind.MINE
-                || (active.kind == Task.Kind.OBTAIN && active.item != null && ORE_SOURCES.containsKey(active.item)))) {
+            if (active != null && active.kind == Task.Kind.MINE) {
                 finishActive("我没有镐子呀，挖不动矿…给我个镐子嘛~");
             } else {
                 resetMining(sw);
@@ -213,16 +227,11 @@ public class WorkGoal extends Goal {
         WorkUtil.equipTool(gf, kind);
 
         // Pickaxe too low-tier to actually harvest this ore (e.g. stone vs diamond) — don't grind it
-        // drop-lessly. A specific obtain job is a dead end (report it); otherwise skip this deposit.
+        // drop-lessly. An order will re-evaluate tools the next time it chooses a target.
         if (kind == WorkUtil.ToolKind.PICKAXE && WorkUtil.isOre(st) && !WorkUtil.heldCanHarvest(gf, st)) {
-            if (active != null && active.kind == Task.Kind.OBTAIN && active.item != null
-                && ORE_SOURCES.containsKey(active.item)) {
-                finishActive("我的镐子不够硬，挖不到" + WorkUtil.displayName(active.item) + "呀…换把更好的给我嘛~");
-            } else {
-                resetMining(sw);
-                blacklist(now, target);
-                target = null;
-            }
+            resetMining(sw);
+            blacklist(now, target);
+            target = null;
             return;
         }
 
@@ -248,13 +257,9 @@ public class WorkGoal extends Goal {
         lastStage = -1;
         target = null;
 
-        if (active != null && active.kind != Task.Kind.HARVEST) {
-            active.remaining--;
-            // 自动烧炼检查：如果当前开采完成，且目标是烧炼产物（例如铁锭），自动将背包粗矿烧炼
-            if (active.kind == Task.Kind.OBTAIN && active.item != null && SmeltUtil.isSmeltableResult(active.item)) {
-                SmeltUtil.trySmeltInInventory(gf, active.item);
-            }
-            if (active.remaining <= 0) finishActive(doneMessage(active));
+        if (active != null && (active.kind == Task.Kind.MINE || active.kind == Task.Kind.CHOP)
+            && predicateForTask(active).test(st)) {
+            if (--active.remaining <= 0) finishActive(doneMessage(active));
         }
     }
 
@@ -284,14 +289,89 @@ public class WorkGoal extends Goal {
 
     /** Lock the first queued job that currently has a reachable target as the active one. */
     private boolean pickActiveTask() {
-        List<Task> queue = gf.getTasks();
-        for (Task t : queue) {
-            if (findTargetFor(t) != null) {
-                gf.setActiveTask(t);
+        if (gf.getTasks().isEmpty()) return false;
+        long now = gf.getEntityWorld().getTime();
+        if (now < nextQueueScan) return false;
+        nextQueueScan = now + 30;
+        for (Task task : List.copyOf(gf.getTasks())) {
+            BlockPos pos = task.kind == Task.Kind.OBTAIN ? orderTarget(task) : findTargetFor(task);
+            if (pos != null) {
+                gf.setActiveTask(task);
                 return true;
             }
         }
         return false;
+    }
+
+    /** All entry points queue the finished product. Prerequisites stay in her backpack. */
+    public record OrderReceipt(int given, int queued, boolean supported) {}
+
+    public static OrderReceipt requestItem(GirlfriendEntity gf, Item item, int count) {
+        int given = gf.giveToOwner(item, count);
+        int missing = count - given;
+        if (missing <= 0) return new OrderReceipt(given, 0, true);
+        if (!SupplyOrder.canSupply(gf, item)) return new OrderReceipt(given, 0, false);
+        gf.enqueueTask(Task.obtain(item, missing));
+        return new OrderReceipt(given, missing, true);
+    }
+
+    private BlockPos orderTarget(Task order) {
+        if (gf.countItem(order.item) > 0) {
+            order.remaining -= gf.giveToOwner(order.item, order.remaining);
+            if (order.remaining <= 0) {
+                gf.setActiveTask(order);
+                gf.addAffection(2);
+                finishActive(doneMessage(order));
+                return null;
+            }
+            if (gf.countItem(order.item) > 0) {
+                reportDelay(order, gf.getOwner() == null ? "等你回来交货" : "已经备好了，等你的背包腾出位置");
+                return null;
+            }
+        }
+        SupplyOrder.Step step = SupplyOrder.produce(gf, order.item, order.remaining);
+        // Mining prerequisites can themselves need a tool: iron -> stone pick -> cobble -> wood pick.
+        for (int depth = 0; depth < 4; depth++) {
+            order.step = step.description();
+            if (step.gather() == null) {
+                if (step.blocked()) reportDelay(order, step.description());
+                return null;
+            }
+            BlockPos position = findTargetFor(step.gather());
+            if (position == null) {
+                reportDelay(order, step.description() + "，附近还没找到");
+                return null;
+            }
+            BlockState state = gf.getEntityWorld().getBlockState(position);
+            WorkUtil.ToolKind kind = WorkUtil.toolFor(state);
+            if (!state.isToolRequired() || (WorkUtil.equipTool(gf, kind) && WorkUtil.heldCanHarvest(gf, state)))
+                return position;
+            Item pickaxe = minimumPickaxe(state);
+            if (pickaxe == null || !ConfigManager.get().behavior.autoCraft) {
+                reportDelay(order, "需要一把能采下这种方块的工具");
+                return null;
+            }
+            step = SupplyOrder.produce(gf, pickaxe, 1);
+        }
+        return null;
+    }
+
+    private void reportDelay(Task order, String reason) {
+        order.step = reason;
+        PlayerEntity owner = gf.getOwner();
+        long now = gf.getEntityWorld().getTime();
+        if (owner == null || gf.squaredDistanceTo(owner) > 256 || now < nextOrderNotice
+            || reason.equals(order.reportedDelay)) return;
+        SpeechBus.speak(gf, "你托我准备的" + WorkUtil.displayName(order.item) + "：" + reason + "。");
+        order.reportedDelay = reason;
+        nextOrderNotice = now + 1200;
+    }
+
+    private static Item minimumPickaxe(BlockState block) {
+        for (Item item : List.of(Items.WOODEN_PICKAXE, Items.STONE_PICKAXE, Items.IRON_PICKAXE, Items.DIAMOND_PICKAXE)) {
+            if (new ItemStack(item).isSuitableFor(block)) return item;
+        }
+        return null;
     }
 
     private BlockPos findIdleTarget() { return findTargetFor(null); }
@@ -357,14 +437,6 @@ public class WorkGoal extends Goal {
     private static Predicate<BlockState> predicateForItem(Item item) {
         if (item == null) return null;
         Set<Block> ores = ORE_SOURCES.get(item);
-        // 递归配方链探测：如果目标物品是烧炼产物（如铁锭由粗铁/铁矿烧炼而成），优先寻找原料矿石
-        if (SmeltUtil.isSmeltableResult(item)) {
-            Item rawSource = SmeltUtil.getRawSourceFor(item);
-            if (rawSource != null && ORE_SOURCES.containsKey(rawSource)) {
-                Set<Block> rawOres = ORE_SOURCES.get(rawSource);
-                return st -> rawOres.contains(st.getBlock());
-            }
-        }
         if (ores != null) {
             boolean crop = item == Items.WHEAT || item == Items.CARROT || item == Items.POTATO || item == Items.BEETROOT;
             return crop
@@ -373,12 +445,17 @@ public class WorkGoal extends Goal {
         }
         if (item instanceof BlockItem bi) {
             Block block = bi.getBlock();
-            // "木头/wood/oak_log" → harvest ANY log, not just oak, so she uses whatever tree is near.
-            if (WorkUtil.isLog(block.getDefaultState())) return WorkUtil::isLog;
             return st -> st.getBlock() == block;
         }
         return null;
     }
+
+    public static boolean isRawMaterial(Item item) {
+        return ORE_SOURCES.containsKey(item) ||
+            (item instanceof BlockItem block && WorkUtil.isLog(block.getBlock().getDefaultState()));
+    }
+
+    public static boolean hasBlockSource(Item item) { return predicateForItem(item) != null; }
 
     /** Can this job be sourced at all (ore/crop/block she knows how to gather)? Used by the commands/tools. */
     public static boolean isGettable(Task t) {
@@ -419,7 +496,7 @@ public class WorkGoal extends Goal {
             case MINE -> "挖矿中";
             case CHOP -> "砍树中";
             case HARVEST -> "收庄稼中";
-            case OBTAIN -> "去找" + WorkUtil.displayName(t.item);
+            case OBTAIN -> t.step.isEmpty() ? "准备" + WorkUtil.displayName(t.item) : t.step;
         };
     }
 
@@ -432,13 +509,8 @@ public class WorkGoal extends Goal {
         };
     }
 
-    /** Finish the ACTIVE job: hand over obtain items, drop it from the queue, speak. Other jobs remain. */
+    /** Remove only the finished job. Deliveries reach here after actual transfer. */
     private void finishActive(String message) {
-        Task t = gf.getTask();
-        if (t != null && t.kind == Task.Kind.OBTAIN && t.item != null) {
-            gf.giveToOwner(t.item, Integer.MAX_VALUE);
-            gf.addAffection(2);
-        }
         gf.completeActiveTask();
         gf.getNavigation().stop();
         target = null;

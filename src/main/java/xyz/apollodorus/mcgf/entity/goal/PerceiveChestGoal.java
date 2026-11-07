@@ -57,7 +57,7 @@ public class PerceiveChestGoal extends Goal {
     public boolean canStart() {
         GirlfriendConfig.Behavior b = ConfigManager.get().behavior;
         if (!b.autoPerceiveChests) return false;
-        if (gf.getTarget() != null || gf.getTask() != null) return false; // fighting / commanded work first
+        if (gf.getTarget() != null || !gf.getTasks().isEmpty()) return false; // fighting / commanded work first
         if (gf.isSleeping()) return false;                                 // 打盹中别去看箱子
         if (gf.isFollowing() && !gf.isOwnerStationary()) return false;     // don't leave a moving owner
         if (nearHome(b)) return false;                                     // hushed near home
@@ -71,7 +71,7 @@ public class PerceiveChestGoal extends Goal {
     public boolean shouldContinue() {
         GirlfriendConfig.Behavior b = ConfigManager.get().behavior;
         if (!b.autoPerceiveChests || target == null) return false;
-        if (gf.getTarget() != null || gf.getTask() != null) return false;
+        if (gf.getTarget() != null || !gf.getTasks().isEmpty()) return false;
         // NOTE: unlike canStart, we do NOT abort just because the owner started moving — once she's
         // committed to a chest she keeps walking there (leading him over). She only bails if he wanders
         // far off (then follow/teleport rejoins him), or the chest is gone, or she's back near home.

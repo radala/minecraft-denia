@@ -289,10 +289,13 @@ public final class WorkUtil {
         Item seed = before.getBlock() instanceof CropBlock ? cropSeed(before.getBlock()) : null;
 
         gf.swingHand(Hand.MAIN_HAND);
-        world.breakBlock(pos, true, gf);
+        var blockEntity = before.hasBlockEntity() ? world.getBlockEntity(pos) : null;
+        ItemStack tool = gf.getEquippedStack(EquipmentSlot.MAINHAND);
+        if (!world.breakBlock(pos, false, gf)) return;
+        if (!before.isToolRequired() || tool.isSuitableFor(before))
+            Block.dropStacks(before, world, pos, blockEntity, gf, tool);
 
         // 消耗手中工具耐久度
-        ItemStack tool = gf.getEquippedStack(EquipmentSlot.MAINHAND);
         if (!tool.isEmpty() && tool.isDamageable()) {
             tool.damage(1, gf, EquipmentSlot.MAINHAND);
         }
@@ -349,7 +352,7 @@ public final class WorkUtil {
     private static final Map<String, String> ALIASES = Map.ofEntries(
         Map.entry("木头", "oak_log"), Map.entry("原木", "oak_log"), Map.entry("木材", "oak_log"),
         Map.entry("橡木", "oak_log"), Map.entry("煤", "coal"), Map.entry("煤炭", "coal"),
-        Map.entry("铁", "raw_iron"), Map.entry("铁矿", "raw_iron"), Map.entry("铁锭", "iron_ingot"),
+        Map.entry("铁", "raw_iron"), Map.entry("铁矿", "raw_iron"), Map.entry("铁锭", "iron_ingot"), Map.entry("铁镐", "iron_pickaxe"),
         Map.entry("金", "raw_gold"), Map.entry("金矿", "raw_gold"), Map.entry("金锭", "gold_ingot"),
         Map.entry("铜", "raw_copper"), Map.entry("钻石", "diamond"), Map.entry("绿宝石", "emerald"),
         Map.entry("红石", "redstone"), Map.entry("青金石", "lapis_lazuli"), Map.entry("青金", "lapis_lazuli"),
@@ -397,16 +400,14 @@ public final class WorkUtil {
             else mapped = key;
         }
 
-        Item item = Registries.ITEM.get(Identifier.of("minecraft", mapped));
-        if (item != null && item != Items.AIR) return item;
-
-        // Try direct lookup with original key
-        item = Registries.ITEM.get(Identifier.of("minecraft", key));
+        Identifier id = Identifier.tryParse(mapped);
+        if (id == null) return null;
+        Item item = Registries.ITEM.get(id);
         return item == Items.AIR ? null : item;
     }
 
     public static String displayName(Item item) {
-        return path(item);
+        return item.getName().getString();
     }
 
     private static String path(Item item) {

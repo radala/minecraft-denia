@@ -3,20 +3,23 @@ package xyz.apollodorus.mcgf.entity;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.util.WorldSavePath;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
 /**
- * Per-owner companion bond state, persisted to config/mcgf-downed.json so it
- * survives restarts. Keyed by the owner's UUID — one companion per owner. Tracks
- * three things:
+ * Per-world companion bond state, keyed by the owner's UUID.
  * <ul>
  *   <li>{@code downed} — she died; the charm can revive her (for an XP cost that
  *       grows by one level each time, via {@code reviveCount}).</li>
@@ -32,58 +35,97 @@ public final class DownedManager {
 
     /** Serialized state of a companion, enough to rebuild her (dead or captured-alive). */
     public static final class Snapshot {
-        public String inventory = "";
+        public String belongings; // SNBT preserves component types, including nested container items.
+        public String inventory;  // pre-travel update snapshot
         public int affection;
         public double x, y, z;
         public double health;
         public boolean hasHome;
         public int homeX, homeY, homeZ;
-        // 新增：单独保存各装备槽，key = slot.getName()
-        public Map<String, String> equipment = new HashMap<>();
+        public Map<String, String> equipment; // legacy gear by equipment slot name
     }
 
     private static final class Store {
         Map<String, Snapshot> downed = new HashMap<>();      // dead → revivable
         Map<String, Integer> reviveCount = new HashMap<>();
         Map<String, Snapshot> stored = new HashMap<>();      // captured alive → releasable
+
+        Store copy() {
+            Store next = new Store();
+            next.downed.putAll(downed);
+            next.reviveCount.putAll(reviveCount);
+            next.stored.putAll(stored);
+            return next;
+        }
     }
 
     private static volatile Store store = new Store();
 
-    private static Path path() {
-        return FabricLoader.getInstance().getConfigDir().resolve("mcgf-downed.json");
+    private static Path file;
+
+    public static synchronized void load(MinecraftServer server) {
+        Path world = server.getSavePath(WorldSavePath.ROOT).toAbsolutePath().normalize();
+        Path legacy = FabricLoader.getInstance().getConfigDir().resolve("mcgf-downed.json");
+        load(world, legacy);
     }
 
-    public static void load() {
-        Path file = path();
+    static synchronized void load(Path world, Path legacy) {
+        Path target = world.resolve("mcgf-downed.json");
+        file = null;
+        store = new Store();
         try {
-            if (Files.notExists(file)) { store = new Store(); return; }
-            Store s = GSON.fromJson(Files.readString(file, StandardCharsets.UTF_8), Store.class);
-            store = s != null ? s : new Store();
-            if (store.downed == null) store.downed = new HashMap<>();
-            if (store.reviveCount == null) store.reviveCount = new HashMap<>();
-            if (store.stored == null) store.stored = new HashMap<>();
+            if (Files.notExists(target) && Files.isRegularFile(legacy)) {
+                // The old format has no world identifier. Do not guess between existing worlds.
+                boolean soleSave;
+                try (var siblings = Files.list(world.getParent())) {
+                    soleSave = Files.isRegularFile(world.resolve("level.dat")) &&
+                        siblings.noneMatch(p -> !p.equals(world) && Files.isRegularFile(p.resolve("level.dat")));
+                }
+                if (soleSave) {
+                    Files.move(legacy, target);
+                    LOGGER.info("[mcgf] Migrated legacy bond store to {}", world);
+                } else {
+                    LOGGER.warn("[mcgf] Legacy {} has no world identifier. To restore it, move it into its original save directory while the game is closed.", legacy);
+                }
+            }
+            if (Files.exists(target)) {
+                Store s = GSON.fromJson(Files.readString(target, StandardCharsets.UTF_8), Store.class);
+                if (s == null) throw new IOException("empty bond store");
+                if (s.downed == null) s.downed = new HashMap<>();
+                if (s.reviveCount == null) s.reviveCount = new HashMap<>();
+                if (s.stored == null) s.stored = new HashMap<>();
+                store = s;
+            }
+            file = target;
         } catch (Exception e) {
             LOGGER.warn("[mcgf] failed to load bond store: {}", e.toString());
-            store = new Store();
         }
     }
 
-    private static void save() {
+    private static boolean save(Store next) {
+        if (file == null) return false;
+        Path temp = file.resolveSibling("mcgf-downed.json.tmp");
         try {
-            Path file = path();
-            Files.createDirectories(file.getParent());
-            Files.writeString(file, GSON.toJson(store), StandardCharsets.UTF_8);
+            Files.writeString(temp, GSON.toJson(next), StandardCharsets.UTF_8);
+            try {
+                Files.move(temp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING);
+            }
+            store = next;
+            return true;
         } catch (Exception e) {
             LOGGER.warn("[mcgf] failed to save bond store: {}", e.toString());
+            return false;
         }
     }
 
     // --- downed (dead → revive) ---
 
-    public static synchronized void setDowned(UUID owner, Snapshot snap) {
-        store.downed.put(owner.toString(), snap);
-        save();
+    public static synchronized boolean setDowned(UUID owner, Snapshot snap) {
+        Store next = store.copy();
+        next.downed.put(owner.toString(), snap);
+        return save(next);
     }
 
     public static Snapshot getDowned(UUID owner) {
@@ -94,8 +136,9 @@ public final class DownedManager {
         return store.downed.containsKey(owner.toString());
     }
 
-    public static synchronized void clearDowned(UUID owner) {
-        if (store.downed.remove(owner.toString()) != null) save();
+    public static synchronized boolean clearDowned(UUID owner) {
+        Store next = store.copy();
+        return next.downed.remove(owner.toString()) != null && save(next);
     }
 
     public static int getReviveCount(UUID owner) {
@@ -103,15 +146,17 @@ public final class DownedManager {
     }
 
     public static synchronized void incrementReviveCount(UUID owner) {
-        store.reviveCount.merge(owner.toString(), 1, Integer::sum);
-        save();
+        Store next = store.copy();
+        next.reviveCount.merge(owner.toString(), 1, Integer::sum);
+        save(next);
     }
 
     // --- stored (captured alive → release) ---
 
-    public static synchronized void setStored(UUID owner, Snapshot snap) {
-        store.stored.put(owner.toString(), snap);
-        save();
+    public static synchronized boolean setStored(UUID owner, Snapshot snap) {
+        Store next = store.copy();
+        next.stored.put(owner.toString(), snap);
+        return save(next);
     }
 
     public static Snapshot getStored(UUID owner) {
@@ -122,7 +167,8 @@ public final class DownedManager {
         return store.stored.containsKey(owner.toString());
     }
 
-    public static synchronized void clearStored(UUID owner) {
-        if (store.stored.remove(owner.toString()) != null) save();
+    public static synchronized boolean clearStored(UUID owner) {
+        Store next = store.copy();
+        return next.stored.remove(owner.toString()) != null && save(next);
     }
 }

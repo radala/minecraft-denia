@@ -1,0 +1,8 @@
+Minecraft 1.21.11; Fabric GameTest; clear-plot
+before tick=17 lintel=minecraft:air placedPlanks=0 bag=55 twoBlockSouthDoorOpen=true
+first build complete=true message=营地搭好了，门在南边。进来吧，里面放得下我们两张床。
+immediately tick=17 lintel=minecraft:oak_planks placedPlanks=55 bag=0 twoBlockSouthDoorOpen=true
+after-expiry tick=97 lintel=minecraft:oak_planks placedPlanks=55 bag=0 twoBlockSouthDoorOpen=true
+second build complete=true message=墙和屋顶都在，南边的门也通着，我们可以歇脚了。
+after-retry tick=97 lintel=minecraft:oak_planks placedPlanks=55 bag=0 twoBlockSouthDoorOpen=true
+PASS: 55 permanent planks, open south doorway; unchanged after expiry and retry

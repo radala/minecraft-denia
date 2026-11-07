@@ -24,6 +24,7 @@ import xyz.apollodorus.mcgf.entity.goal.WorkGoal;
 import xyz.apollodorus.mcgf.entity.work.BoatUtil;
 import xyz.apollodorus.mcgf.entity.work.CraftUtil;
 import xyz.apollodorus.mcgf.entity.work.ActionExecutor;
+import xyz.apollodorus.mcgf.entity.work.TravelCamp;
 import xyz.apollodorus.mcgf.entity.work.ContainerInteractUtil;
 import xyz.apollodorus.mcgf.entity.work.ItemAppraiser;
 import xyz.apollodorus.mcgf.entity.work.WorkUtil;
@@ -50,9 +51,9 @@ public final class Tools {
         arr.add(fn("mine_ore", "去附近挖矿石。可选 count 指定块数。", countParam("要挖的矿石数量；玩家没说具体数就别填，默认16")));
         arr.add(fn("chop_logs", "去附近砍树收集原木。可选 count 指定块数。", countParam("要砍的原木数量；玩家没说具体数就别填，默认16")));
         arr.add(fn("harvest_crops", "去附近收割成熟的庄稼并自动补种。", emptyParams()));
-        arr.add(fn("obtain_item", "玩家想要某样东西时使用：背包里有就直接给，没有就去附近采集。item 可用中文俗称。",
+        arr.add(fn("obtain_item", "玩家托你做、找或交付物品（如“帮我做一把铁镐”）时调用。下单后会保留材料，自动准备、合成或烧炼并交付；同一委托只需安排一次。",
             itemCountParams("物品名（中/英），如 铁、煤、钻石、木头、小麦、diorite", "需要的数量；玩家明确说了数量才填，没说就别填（采集类默认16）")));
-        arr.add(fn("craft_item", "用背包里的材料合成某样东西（工具、鱼竿、木板、木棍、盔甲…都行）：缺木板/木棍这类中间材料会自动先做出来；缺矿石/线这类采不到又合不成的原始材料会告诉你缺什么，你再让她去采。做好的东西放进她背包（要给玩家需再调 give_items_to_player）。",
+        arr.add(fn("craft_item", "用已有材料为自己立即合成并留下成品。玩家要你制作并交给他的物品时使用 obtain_item。",
             itemCountParams("要合成的物品名（中/英），如 木镐、鱼竿、工作台、箱子、铁剑", "要做的数量；不填默认1")));
         arr.add(fn("remember_need", "记住玩家想要的东西，之后遇到就顺手收集。",
             itemCountParams("物品名（中/英）", "想要的数量")));
@@ -88,6 +89,7 @@ public final class Tools {
         JsonObject shelterProps = new JsonObject();
         shelterProps.add("danger", prop("string", "危险原因（如 怪物围攻、突降暴雨、残血濒死）"));
         arr.add(fn("emergency_shelter", "就地迅速搭建3x3安全庇护掩体防怪防暴雨", object(shelterProps)));
+        arr.add(fn("make_camp", "和玩家在你脚下的平地搭一间5×5旅行营地。返回完工情况或准确的缺料与选址原因。", emptyParams()));
 
         JsonObject chestProps = new JsonObject();
         chestProps.add("action", prop("string", "交互动作：deposit(存入低价值杂物), withdraw(取出指定物品), loot_all(搜刮全部实用物资)"));
@@ -143,7 +145,7 @@ public final class Tools {
                     return queued(gf, t);
                 }
                 case "obtain_item":
-                    return obtain(gf, args);
+                    return obtain(gf, args).json();
                 case "craft_item":
                     return craft(gf, args);
                 case "remember_need":
@@ -216,9 +218,13 @@ public final class Tools {
                     boolean success = ActionExecutor.placeBlockAt(gf, p, item);
                     return "{\"ok\":" + success + "}";
                 }
-                case "emergency_shelter": {
-                    boolean success = ActionExecutor.buildSimpleShelter(gf);
-                    return "{\"ok\":" + success + "}";
+                case "emergency_shelter":
+                case "make_camp": {
+                    TravelCamp.Result result = TravelCamp.build(gf, name.equals("make_camp"));
+                    JsonObject response = new JsonObject();
+                    response.addProperty("ok", result.complete());
+                    response.addProperty("message", result.message());
+                    return response.toString();
                 }
                 case "interact_chest": {
                     if (gf.getEntityWorld() instanceof ServerWorld sw) {
@@ -272,45 +278,32 @@ public final class Tools {
 
     // --- tool bodies ---
 
-    private static String obtain(GirlfriendEntity gf, JsonObject args) {
+    record Commission(String json, String receipt) {}
+
+    /** The receipt describes only inventory transfers and requests accepted on this server tick. */
+    static Commission obtain(GirlfriendEntity gf, JsonObject args) {
         Item item = WorkUtil.resolveItem(str(args, "item"));
-        if (item == null) return err("不认识这个物品");
+        if (item == null) return new Commission(err("不认识这个物品"), "我没认出这个物品，能换个名字告诉我吗？");
         gf.removeGatherBlacklist(item);   // 玩家现在又要它了 → 自动解除黑名单（用户要求：拉黑后又要就自动恢复并去弄）
         // 没指定数量时：可采集的方块/矿物默认一批(=defaultGatherCount, 16)，一次性物品(工具/食物)默认 1。
         // 修复「让她挖圆石却只挖一个」：圆石走 obtain（非矿石），以前默认写死 1。
         int fallback = WorkGoal.isGettable(Task.obtain(item, 1))
             ? ConfigManager.get().behavior.defaultGatherCount : 1;
         int want = count(args, fallback);
-        int have = gf.countItem(item);
-        int giveNow = Math.min(have, want);
-        int given = giveNow > 0 ? gf.giveToOwner(item, giveNow) : 0;
-        int remaining = want - given;
-        if (remaining <= 0) return "{\"ok\":true,\"gave\":" + given + "}";
-        Task t = Task.obtain(item, remaining);
-        if (!WorkGoal.isGettable(t)) {
-            // 尝试直接合成（如果原料齐全）
-            CraftUtil.Result cr = CraftUtil.craft(gf, item, remaining);
-            if (cr.ok() && cr.crafted() > 0) {
-                int more = gf.giveToOwner(item, cr.crafted());
-                return "{\"ok\":true,\"gave\":" + (given + more) + ",\"crafted\":true}";
-            }
-            // 否则推导合成链所需的基础原料，并入队采集原料任务！
-            List<Item> missing = CraftUtil.getMissingRawMaterials(gf, item);
-            if (missing != null && !missing.isEmpty()) {
-                Item raw = missing.get(0);
-                Task rawTask = Task.obtain(raw, Math.max(1, remaining));
-                if (WorkGoal.isGettable(rawTask)) {
-                    gf.enqueueTask(rawTask);
-                    gf.enqueueTask(t); // 采完原料后再做目标物品
-                    boolean nearbyRaw = WorkGoal.hasNearbyTarget(gf, rawTask);
-                    return "{\"ok\":true,\"gave\":" + given + ",\"nearby\":" + nearbyRaw + ",\"needRaw\":\"" + raw.getName().getString() + "\"}";
-                }
-            }
-            return "{\"ok\":true,\"gave\":" + given + ",\"canSource\":false}";
+        WorkGoal.OrderReceipt order = WorkGoal.requestItem(gf, item, want);
+        JsonObject result = new JsonObject();
+        result.addProperty("ok", order.supported());
+        result.addProperty("gave", order.given());
+        result.addProperty("queued", order.queued());
+        if (!order.supported()) result.addProperty("reason", "目前缺少获取这种物品的途径");
+        String itemName = WorkUtil.displayName(item);
+        String receipt = order.given() > 0 ? "给你 " + order.given() + " 个" + itemName + "。" : "";
+        if (order.queued() > 0) {
+            receipt += "你要的" + (order.given() > 0 ? "另外 " : " ") + order.queued() + " 个" + itemName + "，我记下了。";
+        } else if (!order.supported()) {
+            receipt += "还有 " + (want - order.given()) + " 个" + itemName + "，我暂时没法弄到。";
         }
-        boolean nearby = WorkGoal.hasNearbyTarget(gf, t);
-        gf.enqueueTask(t); // queued; if nothing's nearby she keeps it as a waiting job and retries when idle
-        return "{\"ok\":true,\"gave\":" + given + ",\"willGather\":" + remaining + ",\"nearby\":" + nearby + "}";
+        return new Commission(result.toString(), receipt);
     }
 
     /** Standard result for a freshly-queued gather job, telling the LLM whether a target is nearby now. */

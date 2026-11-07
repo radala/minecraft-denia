@@ -1,0 +1,4 @@
+plugins { id 'fabric-loom' version '1.16.3' }
+tasks.register('verifyReleaseServer', net.fabricmc.loom.task.prod.ServerProductionRunTask)
+tasks.register('verifyReleaseClient', net.fabricmc.loom.task.prod.ClientProductionRunTask)
+apply from: '../../verify-release.gradle'

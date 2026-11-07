@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "denia_port_tests",
+  "version": "1",
+  "name": "Denia port integration tests",
+  "entrypoints": {
+    "client": ["xyz.apollodorus.mcgf.verify.PortClientProbe"],
+    "fabric-gametest": [
+      "xyz.apollodorus.mcgf.TravelCompanionTests",
+      "xyz.apollodorus.mcgf.combat.ResonanceGameTests",
+      "xyz.apollodorus.mcgf.entity.work.BoatBoardingGameTests",
+      "xyz.apollodorus.mcgf.entity.KeepsakeGameTests",
+      "xyz.apollodorus.mcgf.entity.work.SupplyOrderGameTests",
+      "xyz.apollodorus.mcgf.ai.ChatWorldTests",
+      "xyz.apollodorus.mcgf.ai.JourneyGameTests",
+      "xyz.apollodorus.mcgf.verify.OwnerDamageTests"
+    ]
+  },
+  "depends": {
+    "mcgf": "*",
+    "fabric-gametest-api-v1": "*"
+  }
+}

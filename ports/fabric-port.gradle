@@ -1,0 +1,98 @@
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+
+def upstream = file('../..')
+def common = new Properties()
+new File(upstream, 'gradle.properties').withInputStream { common.load(it) }
+version = common.mod_version
+group = common.maven_group
+base.archivesName = "denia-fabric-${port.game}"
+def roots = [projectDir]
+if (port.inherits) roots.add(file(port.inherits))
+roots.add(upstream)
+def widener = 'mcgf-121.accesswidener'
+
+loom {
+    accessWidenerPath = roots.collect { new File(it, "src/main/resources/${widener}") }.find { it.isFile() }
+    splitEnvironmentSourceSets()
+    mods {
+        mcgf {
+            sourceSet sourceSets.main
+            sourceSet sourceSets.client
+        }
+    }
+}
+dependencies {
+    minecraft "com.mojang:minecraft:${port.game}"
+    mappings "net.fabricmc:yarn:${port.yarn}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${common.loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${port.api}"
+}
+
+// Most specific first: javac and the final jar see only one copy of each class.
+['main', 'client'].each { side ->
+    def merged = tasks.register("prepare${side.capitalize()}Java", Sync) {
+        roots.each { root ->
+            from(new File(root, "src/${side}/java")) {
+                if (side == 'client') exclude 'xyz/apollodorus/mcgf/client/render/GirlfriendRenderState.java'
+            }
+        }
+        duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+        into layout.buildDirectory.dir("generated/sources/${side}")
+    }
+    sourceSets[side].java.setSrcDirs([merged])
+    sourceSets[side].resources.setSrcDirs(roots.collect { new File(it, "src/${side}/resources") })
+}
+
+def metadata = tasks.register('preparePortMetadata') {
+    def template = new File(upstream, 'src/main/resources/fabric.mod.json')
+    def output = layout.buildDirectory.file('generated/metadata/fabric.mod.json')
+    inputs.file(template)
+    inputs.property('port', port)
+    inputs.property('version', project.version)
+    outputs.file(output)
+    doLast {
+        def meta = new JsonSlurper().parse(template)
+        meta.version = project.version.toString()
+        meta.depends.minecraft = port.supportedGames
+        meta.depends.java = ">=${port.java}"
+        meta.depends['fabric-api'] = ">=${port.minimumApi}"
+        meta.accessWidener = widener
+        if (port.mixin) meta.mixins.add(port.mixin)
+        def file = output.get().asFile
+        file.parentFile.mkdirs()
+        file.setText(JsonOutput.prettyPrint(JsonOutput.toJson(meta)) + '\n', 'UTF-8')
+    }
+}
+sourceSets.main.resources.exclude 'fabric.mod.json', 'assets/mcgf/items/**'
+if (port.game == '1.20.1') sourceSets.main.resources.exclude 'data/mcgf/loot_table/**'
+processResources {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from(metadata)
+}
+processClientResources {
+    inputs.property('targetJava', port.java)
+    filesMatching('mcgf.client.mixins.json') {
+        filter { line -> line.replace('"JAVA_21"', "\"JAVA_${port.java}\"") }
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = port.java
+    options.compilerArgs.addAll(['-Xmaxerrs', '2000'])
+}
+// The existing Gradle/Loom installation runs on JDK 21. --release enforces the target JVM API.
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+['runClient', 'runServer'].each { taskName ->
+    tasks.named(taskName, JavaExec) {
+        javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(port.java) }
+    }
+}
+
+tasks.register('stagePort', Copy) {
+    def versions = port.supportedGames.collect { it.substring(1) }.join('-')
+    from(tasks.named('remapJar').flatMap { it.archiveFile })
+    into new File(upstream, "lib/Fabric-${versions}")
+    rename { "denia-${project.version}-fabric-${versions}.jar" }
+}

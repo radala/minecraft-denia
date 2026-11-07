@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "denia_tests",
+  "version": "1",
+  "name": "Denia integration tests",
+  "entrypoints": {
+    "fabric-client-gametest": ["xyz.apollodorus.mcgf.client.CompanionJourneyClientTest"],
+    "fabric-gametest": [
+      "xyz.apollodorus.mcgf.TravelCompanionTests",
+      "xyz.apollodorus.mcgf.combat.ResonanceGameTests",
+      "xyz.apollodorus.mcgf.entity.work.BoatBoardingGameTests",
+      "xyz.apollodorus.mcgf.ai.JourneyGameTests",
+      "xyz.apollodorus.mcgf.ai.ChatWorldTests",
+      "xyz.apollodorus.mcgf.entity.KeepsakeGameTests",
+      "xyz.apollodorus.mcgf.entity.work.SupplyOrderGameTests"
+    ]
+  },
+  "depends": {"mcgf": "*", "fabric-gametest-api-v1": "*"}
+}

@@ -6,4 +6,5 @@ import net.minecraft.client.render.entity.state.BipedEntityRenderState;
 public class GirlfriendRenderState extends BipedEntityRenderState {
     public String bubble;
     public boolean formTwo;   // true → render her 形态二 (蚀域) skin
+    public float outfitTurn;
 }

@@ -15,12 +15,14 @@ import xyz.apollodorus.mcgf.MCGirlfriendMod;
 import xyz.apollodorus.mcgf.client.render.GirlfriendEntityModel;
 import xyz.apollodorus.mcgf.client.render.GirlfriendEntityRenderer;
 import xyz.apollodorus.mcgf.client.render.ModEntityModelLayers;
+import xyz.apollodorus.mcgf.client.screen.JournalBook;
 import xyz.apollodorus.mcgf.client.tts.ClipSounds;
 import xyz.apollodorus.mcgf.client.tts.TtsClient;
 import xyz.apollodorus.mcgf.client.tts.VoiceClips;
 import xyz.apollodorus.mcgf.config.ConfigManager;
 import xyz.apollodorus.mcgf.entity.GirlfriendEntities;
 import xyz.apollodorus.mcgf.net.ClipSoundPayload;
+import xyz.apollodorus.mcgf.net.JournalPayload;
 import xyz.apollodorus.mcgf.net.SpeechPayload;
 
 import java.io.InputStream;
@@ -61,6 +63,9 @@ public class MCGirlfriendClient implements ClientModInitializer {
             net.minecraft.client.render.entity.FlyingItemEntityRenderer::new);
 
         xyz.apollodorus.mcgf.client.screen.CompanionScreen.register();
+        xyz.apollodorus.mcgf.client.voice.PushToTalk.register();
+        ClientPlayNetworking.registerGlobalReceiver(JournalPayload.ID, (payload, context) ->
+                context.client().execute(() -> JournalBook.open(context.client(), payload.text())));
 
         ClientPlayNetworking.registerGlobalReceiver(SpeechPayload.ID, (payload, context) ->
             context.client().execute(() -> {

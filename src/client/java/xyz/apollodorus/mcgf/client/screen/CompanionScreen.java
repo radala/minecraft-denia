@@ -43,10 +43,8 @@ public class CompanionScreen extends HandledScreen<CompanionScreenHandler> {
     @Override
     protected void init() {
         super.init();
-        // Two buttons in the extra bottom row: the in-game config editor (so players never have to find
-        // config/mcgf.json by hand) and the task list (view / cancel her queued jobs).
-        int bw = 80, bh = 18, gap = 6;
-        int bx = this.x + (this.backgroundWidth - (bw * 2 + gap)) / 2;
+        int bw = 54, bh = 18, gap = 3;
+        int bx = this.x + (this.backgroundWidth - (bw * 3 + gap * 2)) / 2;
         int by = this.y + 206;
         addDrawableChild(ButtonWidget.builder(Text.literal("接口配置"),
                 b -> { if (this.client != null) { if (this.client.player != null) this.client.player.closeHandledScreen(); this.client.setScreen(new CompanionConfigScreen()); } })
@@ -54,6 +52,11 @@ public class CompanionScreen extends HandledScreen<CompanionScreenHandler> {
         addDrawableChild(ButtonWidget.builder(Text.literal("任务列表"),
                 b -> { if (this.client != null) { if (this.client.player != null) this.client.player.closeHandledScreen(); this.client.setScreen(new CompanionTaskScreen(this.handler.data())); } })
             .dimensions(bx + bw + gap, by, bw, bh).build());
+        addDrawableChild(ButtonWidget.builder(Text.literal("旅行手记"), b -> {
+            if (this.client == null || this.client.player == null) return;
+            this.client.player.closeHandledScreen();
+            this.client.player.networkHandler.sendChatCommand("denia journal");
+        }).dimensions(bx + (bw + gap) * 2, by, bw, bh).build());
     }
 
     @Override

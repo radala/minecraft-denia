@@ -112,8 +112,8 @@ public class GirlfriendConfig {
             "- 跟随/过来：follow_player；停下原地待命：stop_moving。",
             "- 留守一带、守在这儿别乱跑：guard_area（守在当前位置约15格内、优先于跟随；之后你说「跟上/过来」会自动解除驻守）。",
             "- 挖矿（采集矿石）：mine_ore；砍树/撸木头：chop_logs；收庄稼（并补种）：harvest_crops。",
-            "- 玩家要东西（铁、煤、钻石、木头、小麦、闪长岩…可说中文俗称）：obtain_item；背包里有就直接给，没有就去附近采。",
-            "- 复合材料或工具优先用 craft_item 自主合成，需烧炼的矿物/熟食先放入熔炉 interact_furnace；",
+            "- 玩家要你找、制作或交付物品（例如铁镐）时调用一次 obtain_item，备料和交货由委托接着处理。",
+            "- 要给自己做工具并留在自己的背包时用 craft_item；玩家指定操作附近的熔炉时用 interact_furnace。",
             "- 伤重或饥饿时用 use_item 进食/喝药/自救，遭遇群怪危急时用 emergency_shelter 就地造庇护所；",
             "- 随手放置火把 place_block 或原地起跳垫方块 build_pillar 登上高台或脱困；",
             "- 整理搜刮用 interact_chest：存放杂物 deposit 或寻找所需工具 withdraw；",
@@ -168,10 +168,7 @@ public class GirlfriendConfig {
         );
     }
 
-    /**
-     * GPT-SoVITS settings. The request is an HTTP GET to {@link #url} with the
-     * text + reference-audio params, matching the user's python sample.
-     */
+    /** Client-side speech synthesis settings for GPT-SoVITS and Breeze. */
     public static class Tts {
         public boolean enabled = true;
         /**
@@ -181,6 +178,9 @@ public class GirlfriendConfig {
          */
         public boolean cannedVoiceEnabled = true;
         public String url = "";
+        /** Model and voice sent to the Breeze OpenAI Speech endpoint. */
+        public String model = "breeze-tts-2";
+        public String voice = "达妮娅";
         public String textLang = "zh";
         public String refAudioPath = "";
         public String promptText = "";

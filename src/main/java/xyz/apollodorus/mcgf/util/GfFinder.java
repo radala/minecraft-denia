@@ -18,7 +18,8 @@ public final class GfFinder {
     public static GirlfriendEntity nearest(ServerPlayerEntity player, double radius) {
         Box box = player.getBoundingBox().expand(radius);
         List<GirlfriendEntity> list = player.getEntityWorld()
-            .getEntitiesByClass(GirlfriendEntity.class, box, e -> e.isAlive());
+            .getEntitiesByClass(GirlfriendEntity.class, box,
+                e -> e.isAlive() && (e.getOwnerUuid() == null || e.isOwner(player)));
         GirlfriendEntity bestOwned = null, bestAny = null;
         double dOwned = Double.MAX_VALUE, dAny = Double.MAX_VALUE;
         for (GirlfriendEntity gf : list) {

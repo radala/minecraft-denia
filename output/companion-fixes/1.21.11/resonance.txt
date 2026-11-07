@@ -1,0 +1,8 @@
+Minecraft Java 1.21.11 Fabric server; same survival owner; public form-one resonance; ordinary scoreboard (no team); no armor.
+inside ownerBound=true sameScoreboardTeam=false formTwo=false origin=(1.15208305E7, -56.0, 1623358.5) direction=(0.0, -0.0, 1.0) owner=(1.15208319E7, -56.0, 1623361.5) ownerHP=20.0 target=zombie:3982d12e-8b3f-4873-a4da-a3ea9536b674 position=(1.15208305E7, -56.0, 1623361.5) zombieHP=20.0
+inside damage receiver=zombie source=magic hp=12.5 baseDamage=7.5 blocked=false
+inside after first ring ownerHP=20.0 slow=false zombieHP=12.5 ownerMagicHits=0
+outside ownerBound=true sameScoreboardTeam=false formTwo=false origin=(1.15208305E7, -56.0, 1623358.5) direction=(0.0, -0.0, 1.0) owner=(1.15208355E7, -56.0, 1623361.5) ownerHP=20.0 target=zombie:f63ba6a1-6364-478b-b987-a25de693d8de position=(1.15208305E7, -56.0, 1623361.5) zombieHP=20.0
+outside damage receiver=zombie source=magic hp=12.5 baseDamage=7.5 blocked=false
+outside after first ring ownerHP=20.0 slow=false zombieHP=12.5 ownerMagicHits=0
+PASS: owner inside and outside the wave unaffected, actual zombie target damaged in both casts

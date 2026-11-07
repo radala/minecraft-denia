@@ -32,6 +32,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiFunction;
 
 /**
  * The LLM brain. Holds per-player chat history, builds the world context, calls
@@ -43,7 +44,7 @@ public final class ChatBrain {
     private static final Logger LOGGER = LoggerFactory.getLogger("mcgf/brain");
     private static final Gson GSON = new Gson();
 
-    private final LlmClient llm = new LlmClient();
+    private final BiFunction<JsonArray, JsonArray, JsonObject> complete;
     private final Map<UUID, Session> sessions = new ConcurrentHashMap<>();
     /**
      * Per-player coalescing inbox. While a reply is being generated, any further messages from the same
@@ -61,34 +62,46 @@ public final class ChatBrain {
      */
     private final Map<UUID, Deque<String>> recentLines = new ConcurrentHashMap<>();
     private static final int RECENT_MAX = 8;
-    private ExecutorService executor;
+    private final MinecraftServer server;
+    private final ExecutorService executor;
 
-    public ChatBrain() {
-        initExecutor();
+    public ChatBrain(MinecraftServer server) {
+        this(server, new LlmClient()::complete);
     }
 
-    private synchronized void initExecutor() {
-        if (this.executor == null || this.executor.isShutdown() || this.executor.isTerminated()) {
-            AtomicInteger n = new AtomicInteger();
-            this.executor = Executors.newFixedThreadPool(2, r -> {
-                Thread t = new Thread(r, "mcgf-brain-" + n.incrementAndGet());
-                t.setDaemon(true);
-                return t;
-            });
-        }
+    ChatBrain(MinecraftServer server, BiFunction<JsonArray, JsonArray, JsonObject> complete) {
+        this.server = server;
+        this.complete = complete;
+        AtomicInteger n = new AtomicInteger();
+        executor = Executors.newFixedThreadPool(2, r -> {
+            Thread t = new Thread(r, "mcgf-brain-" + n.incrementAndGet());
+            t.setDaemon(true);
+            return t;
+        });
     }
 
-    private synchronized ExecutorService getExecutor() {
-        initExecutor();
-        return this.executor;
+    /** Check on the server thread, including when delayed model results are finally applied. */
+    private boolean isRecipient(GirlfriendEntity gf, ServerPlayerEntity player) {
+        return !executor.isShutdown() && gf.getEntityWorld().getServer() == server
+            && gf.getEntityWorld() == player.getEntityWorld() && gf.isOwner(player)
+            && !player.isRemoved() && player.isAlive();
+    }
+
+    private boolean canRespond(GirlfriendEntity gf, ServerPlayerEntity player) {
+        return isRecipient(gf, player) && !gf.isRemoved() && gf.isAlive();
+    }
+
+    private void applyReply(GirlfriendEntity gf, ServerPlayerEntity player, Runnable action) {
+        server.execute(() -> {
+            if (canRespond(gf, player)) action.run();
+        });
     }
 
     /** Called on the server thread when a nearby owner sends normal chat. */
     public void handleChat(ServerPlayerEntity player, GirlfriendEntity gf, String message) {
+        if (!canRespond(gf, player)) return;
         UUID id = player.getUuid();
         MoodManager.notePlayerChatted(gf);   // 重置沉默感知：玩家说话了 → 回到「活跃」热度
-        MinecraftServer server = gf.getEntityWorld().getServer();
-        if (server == null) return;
 
         // 把消息投进该玩家的合并收件箱。若已有 worker 在处理上一句：不再回「还在想上一句」，而是把这条并进去
         // ——worker 会丢弃上一次还没说出口的结果，把两次提问合并成最新的一次重新回答（见 runInbox）。
@@ -104,7 +117,8 @@ public final class ChatBrain {
         LOGGER.info("[mcgf] <- {}: {}", player.getName().getString(), message);
         if (startWorker) {
             try {
-                getExecutor().submit(() -> runInbox(server, gf, player, id, inbox));
+                Session session = session(id);
+                executor.submit(() -> runInbox(gf, player, session, inbox));
             } catch (java.util.concurrent.RejectedExecutionException ignored) {
                 synchronized (inbox) { inbox.running = false; }
             }
@@ -119,9 +133,9 @@ public final class ChatBrain {
      * exactly one worker is live per player (guarded by {@link Inbox#running}), so the player's Session is
      * only ever touched sequentially.
      */
-    private void runInbox(MinecraftServer server, GirlfriendEntity gf, ServerPlayerEntity player, UUID id, Inbox inbox) {
+    private void runInbox(GirlfriendEntity gf, ServerPlayerEntity player, Session session, Inbox inbox) {
         try {
-            while (true) {
+            while (!executor.isShutdown()) {
                 int startEpoch;
                 String merged;
                 synchronized (inbox) {
@@ -133,7 +147,12 @@ public final class ChatBrain {
                 // Context must be read on the server thread (entity/world state isn't thread-safe).
                 String context;
                 try {
-                    context = server.submit(() -> buildContext(gf, player)).get();
+                    context = server.submit(() -> canRespond(gf, player)
+                        ? buildContext(gf, player) + episodicBlock(player.getUuid()) : null).get();
+                    if (context == null) {
+                        synchronized (inbox) { inbox.messages.clear(); inbox.running = false; }
+                        return;
+                    }
                 } catch (Exception e) {
                     LOGGER.warn("[mcgf] brain ctx error: {}", e.toString());
                     synchronized (inbox) { inbox.messages.clear(); inbox.running = false; }
@@ -142,25 +161,31 @@ public final class ChatBrain {
 
                 Reply reply;
                 try {
-                    reply = orchestrate(server, gf, player, merged, context);
+                    reply = orchestrate(gf, player, session, merged, context);
                 } catch (Exception e) {
                     LOGGER.warn("[mcgf] brain error: {}", e.toString());
                     synchronized (inbox) { inbox.messages.clear(); inbox.running = false; }
-                    server.execute(() -> SpeechBus.speak(gf, "刚才走神了，你再说一次嘛~"));
+                    applyReply(gf, player, () -> SpeechBus.speak(gf, "刚才走神了，你再说一次嘛~"));
                     return;
                 }
 
                 boolean shouldDeliver;
                 synchronized (inbox) {
-                    if (inbox.epoch == startEpoch) {
+                    if (reply.alreadySpoken()) {
+                        // A committed commission must not be submitted twice if another message arrived.
+                        int newerMessages = Math.min(inbox.messages.size(), inbox.epoch - startEpoch);
+                        inbox.messages.subList(0, inbox.messages.size() - newerMessages).clear();
+                        shouldDeliver = true;
+                    } else if (inbox.epoch == startEpoch) {
                         inbox.messages.clear();   // 这批正好答完，期间没有新消息
                         shouldDeliver = true;
                     } else {
                         shouldDeliver = false;    // 期间来了新消息 → 丢弃这次结果，下一轮合并重答
                     }
                 }
+                if (executor.isShutdown()) return;
                 if (shouldDeliver) {
-                    deliver(server, gf, player, reply);
+                    deliver(gf, player, session, reply);
                 } else {
                     LOGGER.info("[mcgf] 新消息打断了上一次生成 → 丢弃旧结果，合并提问重答");
                 }
@@ -173,20 +198,19 @@ public final class ChatBrain {
     }
 
     /**
-     * Run one LLM round (with a single tool round-trip) for {@code message} and return the reply WITHOUT
-     * recording or speaking it — so {@link #runInbox} can discard a result that's been superseded. A null
-     * {@link Reply#finalReply} means the LLM/network failed.
+     * Generate a reply for the inbox. An item commission is acknowledged on the server tick that accepts it;
+     * other replies can be discarded until delivered. A null final reply means the request failed.
      */
-    private Reply orchestrate(MinecraftServer server, GirlfriendEntity gf, ServerPlayerEntity player,
-                              String message, String context) {
+    private Reply orchestrate(GirlfriendEntity gf, ServerPlayerEntity player, Session session,
+                              String message, String context) throws Exception {
         GirlfriendConfig cfg = ConfigManager.get();
         boolean useTools = cfg.llm.toolsEnabled;
-        Session session = session(player.getUuid());
 
         String system = cfg.fillName(gf.isFormTwo() ? cfg.llm.systemPromptForm2 : cfg.llm.systemPrompt)
             + "\n\n[环境]\n" + context;
+        if (useTools) system += "\n[当前委托规则] 玩家托你给他找、做或交付物品时，只需调用一次 obtain_item；"
+            + "queued 是还待交付的数量，只有 gave 才是已给他的数量。给自己做、成品留在自己背包时才用 craft_item。";
         if (!session.memory.isBlank()) system += "\n\n[关于你和他的记忆]\n" + session.memory;
-        system += episodicBlock(player.getUuid());
         system += recentBlock(gf.getUuid());
 
         JsonArray messages = new JsonArray();
@@ -195,7 +219,7 @@ public final class ChatBrain {
         JsonObject userMsg = msg("user", message);
         messages.add(userMsg);
 
-        JsonObject assistant = llm.complete(messages, useTools ? Tools.definitions() : null);
+        JsonObject assistant = complete.apply(messages, useTools ? Tools.definitions() : null);
         if (assistant == null) {
             return new Reply(userMsg, null);   // 网络/LLM 失败：交给 deliver 说一句网络问题，不入历史
         }
@@ -205,6 +229,23 @@ public final class ChatBrain {
             ? assistant.getAsJsonArray("tool_calls") : null;
 
         if (useTools && toolCalls != null && !toolCalls.isEmpty()) {
+            if (toolCalls.asList().stream().allMatch(call -> "obtain_item".equals(getString(
+                    call.getAsJsonObject().getAsJsonObject("function"), "name")))) {
+                String receipt = server.submit(() -> {
+                    if (!canRespond(gf, player)) return null;
+                    List<String> lines = new ArrayList<>();
+                    for (JsonElement call : toolCalls) {
+                        JsonObject args = parseArgs(getString(call.getAsJsonObject().getAsJsonObject("function"), "arguments"));
+                        LOGGER.info("[mcgf] tool obtain_item {}", args);
+                        lines.add(Tools.obtain(gf, args).receipt());
+                    }
+                    // The work goal can finish by the very next tick. Speak before it can report delivery.
+                    String line = String.join(" ", lines);
+                    SpeechBus.speak(gf, line);
+                    return line;
+                }).get();
+                return new Reply(userMsg, receipt, receipt != null);
+            }
             messages.add(assistant);
             for (JsonElement el : toolCalls) {
                 JsonObject call = el.getAsJsonObject();
@@ -212,14 +253,16 @@ public final class ChatBrain {
                 String name = getString(function, "name");
                 JsonObject args = parseArgs(getString(function, "arguments"));
                 LOGGER.info("[mcgf] tool {} {}", name, args);
-                String result = Tools.execute(server, gf, player, name, args);
+                String result = server.submit(() -> canRespond(gf, player)
+                    ? Tools.execute(server, gf, player, name, args) : null).get();
+                if (result == null) return new Reply(userMsg, null);
                 JsonObject toolMsg = new JsonObject();
                 toolMsg.addProperty("role", "tool");
                 toolMsg.addProperty("tool_call_id", getString(call, "id"));
                 toolMsg.addProperty("content", result);
                 messages.add(toolMsg);
             }
-            JsonObject second = llm.complete(messages, null);
+            JsonObject second = complete.apply(messages, null);
             if (second != null) {
                 String r2 = getString(second, "content");
                 if (r2 != null && !r2.isBlank()) reply = r2;
@@ -238,22 +281,21 @@ public final class ChatBrain {
         return new Reply(userMsg, reply);
     }
 
-    /** Record the finished exchange into history/memory and speak it. Called only for a non-superseded result. */
-    private void deliver(MinecraftServer server, GirlfriendEntity gf, ServerPlayerEntity player, Reply reply) {
+    /** Record a delivered exchange, speaking the reply if the tool has not already acknowledged it. */
+    private void deliver(GirlfriendEntity gf, ServerPlayerEntity player, Session session, Reply reply) {
         if (reply.finalReply() == null) {
-            server.execute(() -> SpeechBus.speak(gf, "网络好像有点问题，过会儿再聊嘛~"));
+            applyReply(gf, player, () -> SpeechBus.speak(gf, "网络好像有点问题，过会儿再聊嘛~"));
             return;
         }
         GirlfriendConfig cfg = ConfigManager.get();
-        Session session = session(player.getUuid());
 
         recordRound(session, reply.userMsg(), reply.finalReply(), cfg);
         recordSpoken(gf.getUuid(), reply.finalReply());
 
         LOGGER.info("[mcgf] -> {}: {}", player.getName().getString(), reply.finalReply());
-        server.execute(() -> {
+        applyReply(gf, player, () -> {
             gf.addAffection(1); // chatting with her warms her up
-            SpeechBus.speak(gf, reply.finalReply());
+            if (!reply.alreadySpoken()) SpeechBus.speak(gf, reply.finalReply());
         });
 
         // Fold the conversation into a compact memory once it gets long — done after the reply is
@@ -262,7 +304,9 @@ public final class ChatBrain {
     }
 
     /** A computed-but-not-yet-delivered chat result. {@code finalReply == null} = LLM/network failure. */
-    private record Reply(JsonObject userMsg, String finalReply) {}
+    private record Reply(JsonObject userMsg, String finalReply, boolean alreadySpoken) {
+        Reply(JsonObject userMsg, String finalReply) { this(userMsg, finalReply, false); }
+    }
 
     /** Per-player coalescing buffer: messages awaiting an answer, an epoch (bumped per message), and a worker flag. */
     private static final class Inbox {
@@ -298,6 +342,7 @@ public final class ChatBrain {
                 + "，所在 " + dimensionName(player) + "（这些是他的状态，不是你的；关心他但别像播报员念数据）",
             "你的状态：" + (gf.isFollowing() ? "跟随玩家" : "原地待命")
                 + "，正在「" + gf.getActivity() + "」"
+                + (gf.getTasks().isEmpty() ? "" : "，待办（最多三件）：" + String.join("；", gf.taskLabels().stream().limit(3).toList()))
                 + "，护卫" + (gf.isCombatEnabled() ? "开" : "关")
                 + "，顺手采集" + (gf.isGatherEnabled() ? "开" : "关")
                 + (gf.getHomePos() != null ? "，已设家" : "，未设家"),
@@ -373,36 +418,35 @@ public final class ChatBrain {
      */
     public boolean proactive(GirlfriendEntity gf, String situation) {
         PlayerEntity owner = gf.getOwner();
-        if (!(owner instanceof ServerPlayerEntity sp)) return false;
+        if (!(owner instanceof ServerPlayerEntity sp) || !canRespond(gf, sp)) return false;
         UUID key = gf.getUuid();
         if (isHandlingChat(sp.getUuid()) || !proactivePending.add(key)) return false;
-        MinecraftServer server = gf.getEntityWorld().getServer();
-        if (server == null) { proactivePending.remove(key); return false; }
 
-        String context = buildContext(gf, sp);
+        String context = buildContext(gf, sp) + episodicBlock(sp.getUuid());
         final String memory = session(sp.getUuid()).memory;
         final UUID gfId = gf.getUuid();
-        final UUID ownerId = sp.getUuid();
         GirlfriendConfig cfg = ConfigManager.get();
         final boolean formTwo = gf.isFormTwo();
         try {
-            getExecutor().submit(() -> {
+            executor.submit(() -> {
                 try {
                 String system = cfg.fillName(formTwo ? cfg.llm.ephemeralSystemForm2 : cfg.llm.ephemeralSystem)
                     + "\n\n[环境]\n" + context;
                 if (!memory.isBlank()) system += "\n\n[关于你和他的记忆]\n" + memory;
-                system += episodicBlock(ownerId);
                 system += recentBlock(gfId);
                 system += "\n\n[此刻]\n" + situation;
                 JsonArray messages = new JsonArray();
                 messages.add(msg("system", system));
                 messages.add(msg("user", cfg.llm.proactiveUserPrompt));
-                JsonObject a = llm.complete(messages, null);
+                JsonObject a = complete.apply(messages, null);
                 String reply = normalizeProactiveLine(a == null ? null : getString(a, "content"));
                 if (reply != null && !reply.isBlank()) {
                     final String line = reply;
                     recordSpoken(gfId, line);
-                    server.execute(() -> SpeechBus.speak(gf, line));
+                    // The farewell can finish synthesizing after the companion is tucked into the charm.
+                    server.execute(() -> {
+                        if (isRecipient(gf, sp)) SpeechBus.speak(gf, line);
+                    });
                 }
             } catch (Exception e) {
                 LOGGER.debug("[mcgf] proactive error: {}", e.toString());
@@ -464,8 +508,13 @@ public final class ChatBrain {
         return "\n\n[你最近已经说过下面这些话——这次务必换个话题、换种说法，绝不重复这些句式或用词]\n" + sb;
     }
 
-    public void shutdown() {
+    public synchronized void shutdown() {
         executor.shutdownNow();
+    }
+
+    /** Serialized with shutdown so an old worker cannot persist a summary to the next save. */
+    synchronized void persistSummary(UUID owner, String summary) {
+        if (!executor.isShutdown()) MemoryStore.setMemory(owner, summary);
     }
 
     // --- helpers ---
@@ -484,9 +533,11 @@ public final class ChatBrain {
      */
     private static String episodicBlock(UUID ownerId) {
         List<String> eps = MemoryStore.episodes(ownerId);
-        if (eps.isEmpty()) return "";
+        boolean celebrated = MemoryStore.birthday(ownerId) != null;
+        if (eps.isEmpty() && !celebrated) return "";
         StringBuilder sb = new StringBuilder(
             "\n\n[你们一起经历过的事——都是真发生过的，可以像老朋友那样偶尔自然提一句，但别一次性倒完、也别每句都提]\n");
+        if (celebrated) sb.append("- 你以前很想收到生日蛋糕。这个心愿已经实现：漂泊者为你点了蜡烛，你吹熄蜡烛许了愿。\n");
         int start = Math.max(0, eps.size() - 10);   // 只取最近 10 条，控制 prompt 体积
         for (int i = start; i < eps.size(); i++) sb.append("- ").append(eps.get(i)).append('\n');
         return sb.toString();
@@ -522,7 +573,7 @@ public final class ChatBrain {
         s.memory = summary.length() > cap ? summary.substring(0, cap) : summary;
         s.sinceCompaction.clear();
         s.rounds = 0;
-        MemoryStore.setMemory(ownerId, s.memory);   // 落盘：长期记忆持久化，重启不忘
+        persistSummary(ownerId, s.memory);
         LOGGER.info("[mcgf] compacted conversation memory -> {} chars", s.memory.length());
     }
 
@@ -542,7 +593,7 @@ public final class ChatBrain {
         JsonArray messages = new JsonArray();
         messages.add(msg("system", sys));
         messages.add(msg("user", convo.toString()));
-        JsonObject a = llm.complete(messages, null);
+        JsonObject a = complete.apply(messages, null);
         return a == null ? null : getString(a, "content");
     }
 
