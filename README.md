@@ -1,27 +1,26 @@
-# 写在前面
-> 原本打算制作一个通用的minecraft ai player，但在制作娅娅的攻击模式和形态切换以及相关物品后，这个项目已经不适合用于重新制作另一个ai player了。     
-> 主要代码由claude 4.8完成。
-## 关于皮肤
-[原皮肤](https://namemc.com/skin/479cedd3e79bc95a)       
-**我为了制作二形态把皮肤改得这么难看，挺对不起原作者的。🥲**
-## 关于roleplay
-提示词还不够好     
-速度和质量的平衡没有做好
-## 关于语音
-indextts2是不错的选择，可惜暂时没有时间去做。
+# 达妮娅 · Minecraft 旅行伙伴（Fabric）
 
-# Minecraft AI 伴随实体（Fabric 模组）
-达妮娅会跟随玩家旅行、参与战斗和采集，也能通过在线聊天模型回应玩家。回复可以使用 Breeze 或 GPT-SoVITS 朗读。
+达妮娅能跟你同船过河，在僵尸靠近时出手护卫。你可以请她「帮我做一把铁镐交给我」，看她备料、熔铁，把成品放进你的物品栏。你们一起吹过蜡烛的地方，隔天再回来，她还会记得。
 
-[图文说明书：原版对照、实机玩法与四个版本的安装表](docs/达妮娅模组更新对照与版本说明.pdf) · [三项修复的测试记录与安装包校验值](output/companion-fixes/验证记录.md)
+这是 radala 基于 avilliai 的 `denia0.1.3` 开发的 `feat/travel-companion` 分支。跟随、战斗变身、同船和基础采集合成来自原作。这个分支完善了委托交付，加入旅行手记、双人营地、按 V 听写、Breeze 回话和蓝金二形态造型。[原作者仓库](https://github.com/avilliai/minecraft-denia) · [分支更新日志](CHANGELOG.md) · [图文说明书与实机截图](docs/达妮娅模组更新对照与版本说明.pdf)
 
+## 下载与第一次游玩
 
-- **游戏版本**　主工程为 Fabric 1.21.11，另提供 1.21 / 1.21.1 共用包和 1.20.1 独立包。[安装、开发与验证](ports/README.md)
-- **运行环境**：单人 / 内置服务器（语音在客户端本地播放）
-- **当前开发版**支持旅行手记、共同庆生、采集合成委托、搭营和本地按键听写。
+| Minecraft Java 版 | 运行游戏所需 Java | 模组安装包 |
+| --- | --- | --- |
+| 1.21.11（主版本） | 21 | [1.21.11 的 JAR](lib/denia-0.1.0.jar) |
+| 1.21 或 1.21.1 | 21 | [这两个版本共用的 JAR](lib/Fabric-1.21-1.21.1/denia-0.1.0-fabric-1.21-1.21.1.jar) |
+| 1.20.1 | 17 | [1.20.1 的 JAR](lib/Fabric-1.20.1/denia-0.1.0-fabric-1.20.1.jar) |
+
+1. 选上表对应的 JAR，在 GitHub 文件页点 **Download raw file**。用 Fabric Loader 启动对应的游戏版本，把这一份 JAR 和同游戏版本的 Fabric API 放入该实例的 `mods/`。已实测的 Loader 是 `0.19.3`。[各版本实测的 Fabric API](ports/README.md)
+2. 进世界输入 `/denia summon`。想先试一条委托，可以给她 3 个铁锭和 2 根木棍，再输入 `/denia obtain minecraft:iron_pickaxe 1`。右键她可以查看背包和任务进度。
+3. 想直接对她说话时，先在「接口配置」填好聊天服务，再启动本机 Whisper，按住 **V** 说话、松开核对、按 **Enter** 发送。想听她开口，再启用 Breeze 或 GPT-SoVITS 朗读。[聊天、听写与语音配置](#voice-setup)
+
+<img src="docs/second-form.png" alt="客户端显示达妮娅当前蓝金二形态的正面与背面，可见胸针、前围片、后发和分片裙摆。" width="560">
+
+*当前二形态，游戏客户端正背面对照。可编辑的 Blockbench 模型和导出方法见[模型目录](art/README.md)。*
 
 ## 和达妮娅一起旅行
-
 
 - **第一次生日蛋糕**。在地上摆好原版蛋糕，插上任意颜色的蜡烛并点燃。你和自己的达妮娅都站在蛋糕 4 格内，双手空着，潜行右键她。她会吹熄蜡烛，蛋糕留给你们分享。你走出 24 格后，另一个游戏日与她一起回到 8 格内，等周围安静下来，她会认出这里。
 - **旅行手记**。右键她，点「旅行手记」，或输入 `/denia journal`，可以翻阅最近的共同经历。第一块生日蛋糕单独保存，手记会记下地点和重访。手记与玩家和存档绑定。
@@ -51,12 +50,13 @@ indextts2是不错的选择，可惜暂时没有时间去做。
 
 直接在其附近聊天（不带 `/` 或 `!`）即可对话。
 
-## 配置文件 `config/mcgf.json`
+<a id="voice-setup"></a>
 
-首次运行自动生成。关键字段：
+## 聊天、听写与语音配置
 
-- `llm.baseURL` / `llm.apiKey` / `llm.model`：OpenAI 兼容接口（默认指向你的中转）。
-  也可用环境变量 `MC_BOT_API_KEY` 或 `OPENAI_API_KEY` 覆盖 key。
+首次运行会生成 `config/mcgf.json`。
+
+- `llm.baseURL`、`llm.apiKey` 和 `llm.model` 默认均为空。使用在线聊天时，填入服务方提供的兼容接口地址、密钥和模型名。也可通过环境变量 `MC_BOT_API_KEY` 或 `OPENAI_API_KEY` 提供密钥。
 - `llm.systemPrompt`：人格设定（`{name}` 会替换为 `persona.displayName`）。
 - `tts.url` 填完整语音接口地址，初始为空。作者网关的 Breeze 入口是 `http://api.apollodorus.xyz/v1/audio/speech`。在游戏内右键达妮娅，打开「接口配置」，填入 TTS 地址并打开语音。
 - 使用 Breeze 时，客户端向该接口 POST 台词。语音地址与 `llm.baseURL` 的协议、主机和端口必须相同才能复用聊天密钥。作者的 HTTP 地址会以明文传输密钥和台词。
@@ -77,8 +77,7 @@ whisper-server --model ggml-small-q5_1.bin --host 127.0.0.1 --port 18765 --langu
 ./gradlew runClient      # 开发环境启动客户端测试
 ```
 
-把 `build/libs/-*.jar`（非 `-sources`）丢进 `.minecraft/mods/`，连同
-Fabric Loader + Fabric API 即可。
+主工程构建产物为 `build/libs/denia-0.1.0.jar`。安装步骤见上方版本表。
 
 ### 本机构建环境说明（中国大陆网络）
 
@@ -99,3 +98,9 @@ Fabric Loader + Fabric API 即可。
 运行 `./gradlew runGameTest` 可在 `build/run/gameTest` 的独立世界验证委托、营地、生日回忆和存档兼容。
 
 运行 `./gradlew runClientGameTest` 会打开 Minecraft 客户端，在独立的单人生存世界里用鼠标和键盘输入测试庆生、旅行手记、铁镐交付和搭营。游戏截图保存在 `build/run/clientGameTest/screenshots/`。在本机项目目录下也可以运行 `..\Denia.cmd --offline runClientGameTest`。
+
+四个版本合计执行 82 次服务端测试，全部通过。各版本客户端另行验证了进入单人世界和伙伴交互。[逐版本结果、故障复测与 JAR 校验值](output/companion-fixes/验证记录.md)
+
+## 原作与素材
+
+原作者 avilliai 在原版 README 里记录了制作动机、早期二形态皮肤、角色对话与语音方案的取舍。[原作者手记（固定到分支起点）](https://github.com/avilliai/minecraft-denia/blob/4d95c3f00be6bb24e766b0eefd7a3266c0a3ca67/README.md) · [原作注明的皮肤来源](https://namemc.com/skin/479cedd3e79bc95a)
